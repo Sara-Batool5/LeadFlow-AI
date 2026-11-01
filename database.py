@@ -1,15 +1,14 @@
 import os
+import secrets
+from datetime import datetime
 import streamlit as st
 import psycopg
 from psycopg.rows import dict_row
 
-
 class DatabaseConfigurationError(Exception):
     """Raised when the Neon connection string is missing or invalid."""
 
-
 def get_database_url():
-    """Read the Neon URL from Streamlit Secrets or environment variables."""
     try:
         value = st.secrets.get("NEON_DATABASE_URL", "")
     except Exception:
@@ -18,20 +17,13 @@ def get_database_url():
         value = os.environ.get("NEON_DATABASE_URL", "")
     return value.strip() if value else ""
 
-
 def _require_database_url():
     url = get_database_url()
     if not url:
-        raise DatabaseConfigurationError(
-            "NEON_DATABASE_URL is not configured. Open your Streamlit app's Settings → Secrets "
-            "and add the Neon PostgreSQL connection string."
-        )
+        raise DatabaseConfigurationError("NEON_DATABASE_URL is not configured. Open Streamlit Community Cloud → app Settings → Secrets and add your Neon PostgreSQL connection string.")
     if not url.startswith(("postgresql://", "postgres://")):
-        raise DatabaseConfigurationError(
-            "NEON_DATABASE_URL must be the PostgreSQL connection string copied from Neon."
-        )
+        raise DatabaseConfigurationError("NEON_DATABASE_URL must be a PostgreSQL connection string copied from Neon.")
     return url
-
 
 def get_connection():
     url = _require_database_url()
@@ -39,14 +31,12 @@ def get_connection():
         url += ("&" if "?" in url else "?") + "sslmode=require"
     return psycopg.connect(url, connect_timeout=12, row_factory=dict_row)
 
-
 def test_connection():
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT current_database() AS database_name")
             row = cur.fetchone()
     return f"Connected successfully to Neon database: {row['database_name']}."
-
 
 SCHEMA_STATEMENTS = [
 """CREATE TABLE IF NOT EXISTS sales_owners (
@@ -65,8 +55,8 @@ SCHEMA_STATEMENTS = [
  email VARCHAR(320) NOT NULL,
  company VARCHAR(200), job_title VARCHAR(160), website VARCHAR(500),
  company_size VARCHAR(80), industry VARCHAR(120), country VARCHAR(120),
- source VARCHAR(80) NOT NULL DEFAULT 'website_form',
- need_description TEXT NOT NULL, budget_range VARCHAR(100), timeline VARCHAR(100),
+ source VARCHAR(80) NOT NULL DEFAULT 'website_form', need_description TEXT NOT NULL,
+ budget_range VARCHAR(100), timeline VARCHAR(100),
  status VARCHAR(40) NOT NULL DEFAULT 'new' CHECK (status IN ('new','qualifying','qualified','needs_review','assigned','contacted','closed_won','closed_lost')),
  priority VARCHAR(20) NOT NULL DEFAULT 'unassessed' CHECK (priority IN ('unassessed','low','medium','high','urgent')),
  assigned_owner_id BIGINT REFERENCES sales_owners(id) ON DELETE SET NULL,
@@ -109,22 +99,80 @@ SCHEMA_STATEMENTS = [
 "CREATE INDEX IF NOT EXISTS idx_workflow_events_created_at ON workflow_events (created_at DESC)",
 ]
 
-
 def initialize_schema():
-    """Create the Phase 2 tables and indexes; safe to run more than once."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             for statement in SCHEMA_STATEMENTS:
                 cur.execute(statement)
         conn.commit()
 
-
 def get_table_counts():
     names = ["leads", "sales_owners", "qualification_results", "email_drafts", "workflow_events"]
     counts = {}
     with get_connection() as conn:
         with conn.cursor() as cur:
-            for name in names:  # fixed allow-list; no user-provided SQL identifiers
+            for name in names:
                 cur.execute(f"SELECT COUNT(*) AS count FROM {name}")
                 counts[name] = cur.fetchone()["count"]
     return counts
+
+def get_lead_by_email(email):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id, lead_reference, full_name, email, company, industry, status, priority, created_at
+                           FROM leads WHERE LOWER(email) = LOWER(%s) ORDER BY created_at DESC LIMIT 1""", (email.strip(),))
+            return cur.fetchone()
+
+def create_lead(data):
+    """Insert a lead and an audit event in one transaction."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM leads WHERE LOWER(email) = LOWER(%s) LIMIT 1", (data["email"],))
+            if cur.fetchone():
+                raise ValueError("A lead with this email already exists.")
+            lead_reference = "LF-" + datetime.utcnow().strftime("%y%m%d") + "-" + secrets.token_hex(3).upper()
+            cur.execute("""
+                INSERT INTO leads (
+                    lead_reference, full_name, email, company, job_title, website,
+                    company_size, industry, country, source, need_description,
+                    budget_range, timeline, consent_to_contact, status, priority
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'new','unassessed')
+                RETURNING id, lead_reference, full_name, email, company, industry, status, priority, created_at
+            """, (
+                lead_reference, data["full_name"], data["email"], data.get("company"),
+                data.get("job_title"), data.get("website"), data.get("company_size"),
+                data.get("industry"), data.get("country"), data.get("source", "website_form"),
+                data["need_description"], data.get("budget_range"), data.get("timeline"),
+                data.get("consent_to_contact", False)
+            ))
+            lead = cur.fetchone()
+            cur.execute("""
+                INSERT INTO workflow_events (lead_id, event_type, event_status, message, details, actor)
+                VALUES (%s, 'lead_created', 'completed', %s, %s::jsonb, 'lead_intake_form')
+            """, (lead["id"], f"Lead {lead_reference} submitted and saved.", '{"source":"phase3_lead_intake"}'))
+        conn.commit()
+    return lead
+
+def get_leads():
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT lead_reference, full_name, email, company, job_title, website,
+                       company_size, industry, country, source, need_description,
+                       budget_range, timeline, status, priority, created_at
+                FROM leads ORDER BY created_at DESC, id DESC
+            """)
+            rows = cur.fetchall()
+    return [dict(row) for row in rows]
+
+def get_recent_events(limit=50):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT e.created_at, e.event_type, e.event_status, e.message,
+                       l.lead_reference, e.actor
+                FROM workflow_events e
+                LEFT JOIN leads l ON l.id = e.lead_id
+                ORDER BY e.created_at DESC LIMIT %s
+            """, (limit,))
+            return [dict(row) for row in cur.fetchall()]
