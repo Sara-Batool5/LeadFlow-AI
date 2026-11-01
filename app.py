@@ -1,11 +1,12 @@
 import re
+from difflib import SequenceMatcher
 from datetime import datetime
 import pandas as pd
 import streamlit as st
 from database import (
     get_database_url, test_connection, initialize_schema, get_table_counts,
     DatabaseConfigurationError, create_lead, get_leads, get_recent_events,
-    get_lead_by_email
+    get_lead_by_email, find_potential_duplicates
 )
 
 st.set_page_config(page_title="LeadFlow AI", page_icon="🎯", layout="wide", initial_sidebar_state="expanded")
@@ -46,7 +47,7 @@ with st.sidebar:
     st.divider()
     page = st.radio("Navigation", ["Overview", "Lead Intake", "All Leads", "AI Qualification", "Assignment & Follow-up", "Workflow History", "Database Setup"], index=0)
     st.divider()
-    st.caption("Phase 3 · Functional lead intake")
+    st.caption("Phase 4 · CRM duplicate intelligence")
     st.caption("Demo environment · Use synthetic/test data")
 
 st.markdown("""<div class="hero"><h1>LeadFlow AI</h1><p>From form submission to qualified lead, assigned owner, and reviewed follow-up draft.</p></div>""", unsafe_allow_html=True)
@@ -161,9 +162,25 @@ elif page == "Lead Intake":
             try:
                 existing = get_lead_by_email(email.strip())
                 if existing:
-                    st.warning(f"Possible duplicate: {existing['lead_reference']} already uses this email ({existing['full_name']}). No new record was created.")
+                    st.error(f"Exact duplicate: {existing['lead_reference']} already uses this email ({existing['full_name']}). No new record was created.")
                     st.dataframe(pd.DataFrame([existing]), use_container_width=True, hide_index=True)
                 else:
+                    potential = find_potential_duplicates(
+                        full_name=full_name.strip(),
+                        company=company.strip(),
+                        website=website.strip(),
+                        email=email.strip()
+                    )
+                    if potential:
+                        st.warning("Potential CRM matches found. Review these records before creating another lead.")
+                        st.dataframe(pd.DataFrame(potential), use_container_width=True, hide_index=True)
+                        allow_possible_duplicate = st.checkbox(
+                            "I reviewed these matches and confirm this is a different prospect. Save this lead anyway.",
+                            key="confirm_possible_duplicate"
+                        )
+                        if not allow_possible_duplicate:
+                            st.info("No lead has been saved yet. Tick the confirmation box and submit the form again if this is a genuinely different prospect.")
+                            st.stop()
                     record = create_lead({
                         "full_name": full_name.strip(),
                         "email": email.strip().lower(),
@@ -180,7 +197,11 @@ elif page == "Lead Intake":
                         "consent_to_contact": consent,
                     })
                     st.success(f"Lead saved successfully! Reference: {record['lead_reference']}")
-                    st.info("Phase 3 stores and lists leads. AI qualification, owner assignment, and follow-up drafting are planned for later phases.")
+                    if potential:
+                        st.info("Saved after human review. Potential matches were retained as separate records; no automatic merge or deletion occurred.")
+                    else:
+                        st.info("No likely CRM matches were found. The lead has been saved.")
+
             except Exception as exc:
                 show_db_error(exc)
 
@@ -234,4 +255,4 @@ elif page == "Workflow History":
         show_db_error(exc)
 
 st.divider()
-st.markdown('<p class="small-note">LeadFlow AI · Phase 3 · Functional lead intake, duplicate-email check, persistent lead list, and workflow event logging. AI and assignment integrations are not active yet.</p>', unsafe_allow_html=True)
+st.markdown('<p class="small-note">LeadFlow AI · Phase 4 · CRM duplicate intelligence, human-reviewed potential matches, persistent lead intake, and workflow event logging. AI qualification and assignment are not active yet.</p>', unsafe_allow_html=True)

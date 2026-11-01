@@ -153,6 +153,79 @@ def create_lead(data):
         conn.commit()
     return lead
 
+
+def find_potential_duplicates(full_name, company="", website="", email=""):
+    """Find likely CRM matches by normalized name, company, or website domain.
+    Exact email duplicates are handled separately and block creation.
+    """
+    from difflib import SequenceMatcher
+    from urllib.parse import urlparse
+
+    def norm(value):
+        return " ".join((value or "").lower().strip().split())
+
+    def domain(value):
+        raw = (value or "").strip()
+        if not raw:
+            return ""
+        parsed = urlparse(raw if "://" in raw else "https://" + raw)
+        host = (parsed.netloc or parsed.path).lower()
+        return host[4:] if host.startswith("www.") else host
+
+    target_name = norm(full_name)
+    target_company = norm(company)
+    target_domain = domain(website)
+    target_email_domain = (email.split("@")[-1].lower().strip() if "@" in email else "")
+    common_free_domains = {"gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com", "aol.com", "proton.me", "protonmail.com"}
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, lead_reference, full_name, email, company, website, industry, status, priority, created_at
+                FROM leads
+                ORDER BY created_at DESC
+                LIMIT 500
+            """)
+            rows = cur.fetchall()
+
+    matches = []
+    for row in rows:
+        row = dict(row)
+        row_name = norm(row.get("full_name"))
+        row_company = norm(row.get("company"))
+        row_domain = domain(row.get("website"))
+        row_email_domain = (row.get("email", "").split("@")[-1].lower().strip() if "@" in row.get("email", "") else "")
+        name_score = SequenceMatcher(None, target_name, row_name).ratio() if target_name and row_name else 0
+        same_company = bool(target_company and row_company and target_company == row_company)
+        similar_company = bool(target_company and row_company and SequenceMatcher(None, target_company, row_company).ratio() >= 0.88)
+        same_website = bool(target_domain and row_domain and target_domain == row_domain)
+        same_business_email_domain = bool(
+            target_email_domain and row_email_domain
+            and target_email_domain == row_email_domain
+            and target_email_domain not in common_free_domains
+        )
+        reasons = []
+        if name_score >= 0.88:
+            reasons.append("Very similar contact name")
+        if same_company:
+            reasons.append("Same company")
+        elif similar_company:
+            reasons.append("Very similar company name")
+        if same_website:
+            reasons.append("Same website domain")
+        if same_business_email_domain:
+            reasons.append("Same business email domain")
+        # Require at least two independent signals, or one strong organization-level signal plus a strong name match.
+        likely = (
+            len(reasons) >= 2
+            or (name_score >= 0.94 and (same_company or similar_company or same_website or same_business_email_domain))
+        )
+        if likely:
+            row["Match signals"] = ", ".join(reasons)
+            matches.append(row)
+    return matches[:10]
+
+
 def get_leads():
     with get_connection() as conn:
         with conn.cursor() as cur:

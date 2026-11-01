@@ -1,41 +1,48 @@
-# LeadFlow AI — Phase 3
+# LeadFlow AI — Phase 4
 
-## What Phase 3 adds
-- Functional lead intake form with basic validation.
-- Duplicate-email detection before creating a lead.
-- Persistent lead creation in Neon PostgreSQL.
-- Lead reference generation (for example, `LF-261101-A1B2C3`).
-- Workflow event logged for each successfully created lead.
-- All Leads page connected to Neon, with text search and status filtering.
-- Overview metrics and recent leads loaded from the database.
-- Database Setup shows all five expected tables and displays record counts as a readable table (not raw JSON).
+## What Phase 4 adds
+Phase 4 builds on Phase 3 and adds CRM-style potential duplicate detection.
+
+- Keeps exact email duplicate detection (case-insensitive); exact matches block a second submission.
+- Finds potential matches using multiple signals:
+  - very similar contact name,
+  - same or very similar company name,
+  - same website domain,
+  - same non-free business email domain.
+- Displays possible matches before saving.
+- Requires the user to explicitly confirm that a new prospect is genuinely different before saving when potential matches are found.
+- Does not automatically merge, delete, or overwrite any lead.
+- Keeps the Phase 3 lead intake, persistent lead listing, search/filter, database counts, and workflow history.
 
 ## Files in this ZIP
-Upload and replace these files in the root of your GitHub repository:
+Upload these five files to the root of your existing GitHub repository, replacing the corresponding files:
 - `app.py`
 - `database.py`
 - `schema.sql`
 - `requirements.txt`
 - `README.md`
 
-Do not upload the enclosing ZIP folder itself; upload the five files from inside it to the repository root.
+## Deployment steps
+1. Download and extract this ZIP.
+2. Open your existing LeadFlow AI repository on GitHub.
+3. Upload the five files from the extracted folder to the same repository root where the current `app.py` is located.
+4. Commit the changes to the branch used by Streamlit Community Cloud.
+5. Wait for Streamlit to redeploy.
+6. Keep your existing `NEON_DATABASE_URL` in Streamlit Secrets. Do not copy it into GitHub or share it in chat.
 
-## Before deploying
-1. Keep your existing Streamlit Community Cloud secret named `NEON_DATABASE_URL`. Never put the connection string in GitHub or share it in chat.
-2. Confirm Neon has the five Phase 2 tables. The app's **Database Setup → Create / verify tables** button is safe to run more than once.
-3. Ensure Streamlit Community Cloud is deploying from the branch and root directory where `app.py`, `database.py`, and `requirements.txt` are stored.
-4. After GitHub commits the files, wait for Streamlit to redeploy.
+No new Python package or new database table is required for Phase 4. The update uses the existing Neon tables and records. Do not delete or reset your Neon database.
 
-## Test Phase 3
-1. Open **Database Setup** and click **Test database connection**.
-2. Click **Refresh database counts**. The count table should show five rows and a total.
-3. Open **Lead Intake** and submit a test lead with a valid email and a need description of at least 10 characters.
-4. Open **All Leads** and verify the lead appears.
-5. Return to **Lead Intake** and submit the same email again. The app should flag it as a possible duplicate and not create a second record.
-6. Open **Workflow History** to see the `lead_created` event.
+## Test Phase 4
+1. Open **Lead Intake** and create a synthetic test lead with a unique email, company, and website.
+2. Submit the exact same email again. The app should block it as an exact duplicate.
+3. Submit a different email but the same contact name and company/website. The app should show a potential match and ask for confirmation.
+4. Leave the confirmation unchecked and submit: no record should be created.
+5. Tick the confirmation after reviewing the match and submit again: the new lead should be saved as a separate record.
+6. Check **All Leads**, **Workflow History**, and **Database Setup**.
 
-## Important notes
-- Use synthetic/test contacts while testing.
-- Phase 3 does not call an AI model, assign sales owners, or send emails.
-- Duplicate detection uses email address (case-insensitive). It is an application-level check, not a strict unique database constraint, so concurrent simultaneous submissions could theoretically race. A later hardening phase can add a normalized unique constraint.
-- Existing leads are not deleted or overwritten by this update.
+## Matching limitations and safety
+- Matching is a heuristic, not proof that two records refer to the same person or organization.
+- The lookup checks up to the 500 most recent leads and shows at most 10 likely matches.
+- Free email domains (for example Gmail and Outlook) are excluded from business-domain matching.
+- Potential matches are never merged automatically. A human must review and confirm.
+- Phase 4 does not add AI qualification, enrichment, sales-owner assignment, or email sending.
