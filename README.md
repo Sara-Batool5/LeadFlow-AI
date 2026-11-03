@@ -1,48 +1,41 @@
-# LeadFlow AI — Phase 4
+# LeadFlow AI — Combined Phase 4 Fix + Phase 5
 
-## What Phase 4 adds
-Phase 4 builds on Phase 3 and adds CRM-style potential duplicate detection.
+## What is included
+- Phase 4 fix: pending lead data and possible matches are kept in Streamlit session state. The confirmation checkbox and separate **Confirm and save lead** button are outside the form-submit branch, so reruns do not discard the pending lead.
+- Exact email duplicates are blocked; similar name/company/website/business-email-domain matches require human confirmation.
+- Confirmed leads are saved to Neon and create a `lead_created` workflow event.
+- Phase 5: Groq AI qualification provides a 0–100 score, fit category, priority, reasoning, missing information, and recommended next action.
+- Qualification results and `lead_ai_qualified` workflow events are saved in Neon; lead status and priority are updated.
+- Overview, All Leads, AI Qualification, Workflow History, and Database Setup pages.
 
-- Keeps exact email duplicate detection (case-insensitive); exact matches block a second submission.
-- Finds potential matches using multiple signals:
-  - very similar contact name,
-  - same or very similar company name,
-  - same website domain,
-  - same non-free business email domain.
-- Displays possible matches before saving.
-- Requires the user to explicitly confirm that a new prospect is genuinely different before saving when potential matches are found.
-- Does not automatically merge, delete, or overwrite any lead.
-- Keeps the Phase 3 lead intake, persistent lead listing, search/filter, database counts, and workflow history.
+AI results are advisory and should be reviewed. The app does not send emails or automatically assign leads.
 
-## Files in this ZIP
-Upload these five files to the root of your existing GitHub repository, replacing the corresponding files:
-- `app.py`
-- `database.py`
-- `schema.sql`
-- `requirements.txt`
-- `README.md`
+## Deploy via GitHub website
+1. Extract the ZIP.
+2. Open your existing LeadFlow AI GitHub repository in the browser.
+3. Upload/replace `app.py`, `database.py`, `schema.sql`, `requirements.txt`, and `README.md` in the repository root.
+4. Commit the changes and wait for Streamlit Community Cloud to redeploy.
 
-## Deployment steps
-1. Download and extract this ZIP.
-2. Open your existing LeadFlow AI repository on GitHub.
-3. Upload the five files from the extracted folder to the same repository root where the current `app.py` is located.
-4. Commit the changes to the branch used by Streamlit Community Cloud.
-5. Wait for Streamlit to redeploy.
-6. Keep your existing `NEON_DATABASE_URL` in Streamlit Secrets. Do not copy it into GitHub or share it in chat.
-
-No new Python package or new database table is required for Phase 4. The update uses the existing Neon tables and records. Do not delete or reset your Neon database.
+## Streamlit Secrets
+In Streamlit Community Cloud, open the app's Settings → Secrets and add your own values:
+```toml
+NEON_DATABASE_URL = "your-Neon-connection-string"
+GROQ_API_KEY = "your-Groq-API-key"
+GROQ_MODEL = "openai/gpt-oss-120b"
+```
+`GROQ_MODEL` is optional. Never commit secrets to GitHub or share them in chat.
 
 ## Test Phase 4
-1. Open **Lead Intake** and create a synthetic test lead with a unique email, company, and website.
-2. Submit the exact same email again. The app should block it as an exact duplicate.
-3. Submit a different email but the same contact name and company/website. The app should show a potential match and ask for confirmation.
-4. Leave the confirmation unchecked and submit: no record should be created.
-5. Tick the confirmation after reviewing the match and submit again: the new lead should be saved as a separate record.
-6. Check **All Leads**, **Workflow History**, and **Database Setup**.
+1. Create a lead with a unique email.
+2. Submit another lead with a different email but a similar name, company, website, or business domain.
+3. Review the matches, tick the confirmation checkbox, and click **Confirm and save lead**.
+4. Verify it appears in All Leads and Workflow History, and the lead count increases in Database Setup.
+5. Try the same email again; it should be blocked.
 
-## Matching limitations and safety
-- Matching is a heuristic, not proof that two records refer to the same person or organization.
-- The lookup checks up to the 500 most recent leads and shows at most 10 likely matches.
-- Free email domains (for example Gmail and Outlook) are excluded from business-domain matching.
-- Potential matches are never merged automatically. A human must review and confirm.
-- Phase 4 does not add AI qualification, enrichment, sales-owner assignment, or email sending.
+## Test Phase 5
+1. Ensure `GROQ_API_KEY` is configured in Streamlit Secrets.
+2. Open AI Qualification, select a lead, and click **Qualify selected lead with AI**.
+3. Review the result and check Workflow History / Database Setup for the saved qualification.
+4. If the API call fails, the app displays an error and does not save a fabricated result.
+
+The app creates the five expected tables if absent. Back up Neon before replacing files if your schema was customized.

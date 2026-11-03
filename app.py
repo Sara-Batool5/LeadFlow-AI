@@ -1,258 +1,139 @@
-import re
-from difflib import SequenceMatcher
-from datetime import datetime
-import pandas as pd
+import json, os, re
 import streamlit as st
-from database import (
-    get_database_url, test_connection, initialize_schema, get_table_counts,
-    DatabaseConfigurationError, create_lead, get_leads, get_recent_events,
-    get_lead_by_email, find_potential_duplicates
-)
+from groq import Groq
+from database import *
 
-st.set_page_config(page_title="LeadFlow AI", page_icon="🎯", layout="wide", initial_sidebar_state="expanded")
-
-st.markdown("""
-<style>
-:root { color-scheme: dark; }
-.stApp { background: linear-gradient(135deg,#0b1020 0%,#14152d 55%,#21143a 100%); color:#f4f2ff; }
-[data-testid="stHeader"] { background:rgba(11,16,32,.96); border-bottom:1px solid rgba(167,139,250,.18); }
-[data-testid="stSidebar"] { background:#101326; border-right:1px solid rgba(167,139,250,.22); }
-[data-testid="stSidebar"] * { color:#e9e7ff; }
-.stApp p,.stApp label,.stApp li,.stApp [data-testid="stMarkdownContainer"] { color:#e9e7ff; }
-h1,h2,h3,h4 { color:#fff !important; }
-.hero { padding:1.4rem 1.6rem; border:1px solid rgba(167,139,250,.35); border-radius:18px; background:linear-gradient(120deg,rgba(124,58,237,.22),rgba(59,130,246,.10)); margin-bottom:1.2rem; }
-.hero h1 { margin-bottom:.35rem; color:#fff !important; }
-.hero p { color:#d8d5f0 !important; margin-bottom:0; }
-.small-note { color:#aaa7c8 !important; font-size:.84rem; }
-div[data-testid="stMetric"] { background:rgba(23,27,53,.82); border:1px solid rgba(167,139,250,.3); padding:1rem; border-radius:14px; }
-div[data-testid="stMetricLabel"] { color:#c5c1e4 !important; }
-div[data-testid="stMetricValue"] { color:#fff !important; }
-.stApp input,.stApp textarea,.stApp [data-baseweb="select"] > div { background-color:#171b35 !important; color:#f4f2ff !important; border-color:#62558f !important; border-radius:10px !important; }
-.stApp input::placeholder,.stApp textarea::placeholder { color:#aaa5c9 !important; opacity:1 !important; }
-.stApp button[kind="primary"],.stApp [data-testid="stFormSubmitButton"] button { background:linear-gradient(90deg,#7c3aed,#5b5bd6) !important; color:#fff !important; border:1px solid #8b5cf6 !important; border-radius:10px !important; }
-.stApp [data-testid="stDataFrame"],.stApp [data-testid="stTable"] { border:1px solid #514875; border-radius:12px; overflow:hidden; }
-.stApp hr { border-color:rgba(167,139,250,.22); }
-</style>
-""", unsafe_allow_html=True)
-
-def show_db_error(exc):
-    if isinstance(exc, DatabaseConfigurationError):
-        st.error(str(exc))
-    else:
-        st.error("The database operation failed. Check Database Setup and your Neon connection. Sensitive connection details are hidden.")
-
+st.set_page_config(page_title="LeadFlow AI", page_icon="🟣", layout="wide")
+st.markdown("""<style>.stApp{background:linear-gradient(135deg,#10101d,#17132b,#20143b);color:#f5f3ff}[data-testid="stSidebar"]{background:#11101d}h1,h2,h3,p,label{color:#f5f3ff}div[data-testid="stMetricValue"]{color:#d8b4fe}.stButton>button{border-radius:10px;border:1px solid #8b5cf6}</style>""",unsafe_allow_html=True)
+st.title("🟣 LeadFlow AI")
+st.caption("Lead intake, duplicate intelligence, and AI-assisted qualification")
+for k,v in [("pending_lead",None),("pending_matches",[]),("confirm_possible_duplicate",False),("save_message",None),("last_qualification",None)]:
+    if k not in st.session_state: st.session_state[k]=v
 with st.sidebar:
-    st.markdown("## 🎯 LeadFlow AI")
-    st.caption("Intelligent lead workflow")
-    st.divider()
-    page = st.radio("Navigation", ["Overview", "Lead Intake", "All Leads", "AI Qualification", "Assignment & Follow-up", "Workflow History", "Database Setup"], index=0)
-    st.divider()
-    st.caption("Phase 4 · CRM duplicate intelligence")
-    st.caption("Demo environment · Use synthetic/test data")
+    st.markdown("## LeadFlow AI")
+    page=st.radio("Workspace",["Overview","Lead Intake","All Leads","AI Qualification","Workflow History","Database Setup"])
+    st.caption("AI recommendations require human review.")
+try:
+    if not get_database_url(): st.warning("Add NEON_DATABASE_URL in Streamlit Community Cloud → App settings → Secrets."); st.stop()
+    if not test_connection(): st.error("Could not connect to Neon. Check NEON_DATABASE_URL."); st.stop()
+    initialize_schema()
+except Exception as e:
+    st.error(f"Database setup failed: {e}"); st.stop()
 
-st.markdown("""<div class="hero"><h1>LeadFlow AI</h1><p>From form submission to qualified lead, assigned owner, and reviewed follow-up draft.</p></div>""", unsafe_allow_html=True)
+def qualify(lead):
+    key=None
+    try: key=st.secrets.get("GROQ_API_KEY")
+    except Exception: pass
+    key=key or os.getenv("GROQ_API_KEY")
+    if not key: raise RuntimeError("GROQ_API_KEY is missing. Add it in Streamlit Community Cloud → App settings → Secrets. Never put it in GitHub or chat.")
+    model=None
+    try: model=st.secrets.get("GROQ_MODEL")
+    except Exception: pass
+    model=model or os.getenv("GROQ_MODEL") or "openai/gpt-oss-120b"
+    fields=["lead_reference","contact_name","email","company","website","job_title","industry","country","company_size","budget","timeline","description"]
+    data={k:lead.get(k) for k in fields}
+    prompt=f"""Assess this B2B sales lead using only the supplied facts; do not invent details. Return valid JSON only with score (integer 0-100), category (high_fit, medium_fit, low_fit, needs_review), priority (urgent, high, medium, low), reasoning (string), missing_information (array of strings), recommended_next_action (string), human_review_required (boolean). Use needs_review when evidence is insufficient. This is decision support, not a final decision. Lead: {json.dumps(data,default=str)}"""
+    res=Groq(api_key=key).chat.completions.create(model=model,messages=[{"role":"system","content":"You are a cautious sales qualification assistant. Return valid JSON only."},{"role":"user","content":prompt}],temperature=0.1,max_tokens=900)
+    raw=re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$","",res.choices[0].message.content or "",flags=re.I)
+    m=re.search(r"\{.*\}",raw,re.S)
+    if not m: raise ValueError("The AI response was not valid JSON. Please retry.")
+    x=json.loads(m.group())
+    cats={"high_fit","medium_fit","low_fit","needs_review"}; priorities={"urgent","high","medium","low"}
+    cat=str(x.get("category","needs_review")).lower()
+    pr=str(x.get("priority","medium")).lower()
+    if cat not in cats: cat="needs_review"
+    if pr not in priorities: pr="medium"
+    try: score=max(0,min(100,int(x.get("score",0))))
+    except (ValueError,TypeError): score=0; cat="needs_review"
+    missing=x.get("missing_information",[])
+    if not isinstance(missing,list): missing=[str(missing)]
+    return {"model_name":model,"score":score,"category":cat,"priority":pr,"reasoning":str(x.get("reasoning","No explanation supplied.")),"missing_information":[str(i) for i in missing],"recommended_next_action":str(x.get("recommended_next_action","Review this lead manually.")),"human_review_required":bool(x.get("human_review_required",True))}
 
-if page == "Database Setup":
-    st.subheader("Neon PostgreSQL connection")
-    st.write("Configure your Neon connection string in Streamlit Community Cloud Secrets, then test the connection and verify the LeadFlow AI tables.")
-    st.warning("Never paste your database connection string into this page, chat, or GitHub. Add it only in Streamlit's Secrets settings.")
-    st.write("**Connection string configured:** " + ("Yes" if get_database_url() else "No"))
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Test database connection", type="primary", use_container_width=True):
-            try:
-                st.success(test_connection())
-            except Exception as exc:
-                show_db_error(exc)
-    with c2:
-        if st.button("Create / verify tables", use_container_width=True):
-            try:
-                initialize_schema()
-                st.success("Database schema is ready. Required tables were created or already existed.")
-            except Exception as exc:
-                show_db_error(exc)
-
-    st.markdown("### Tables in this phase")
-    tables_df = pd.DataFrame([
-        {"Table": "leads", "Purpose": "Submitted lead/contact details and workflow status"},
-        {"Table": "sales_owners", "Purpose": "Sales owner names, email, specialization, and availability"},
-        {"Table": "qualification_results", "Purpose": "AI qualification scores, categories, and explanations (later phase)"},
-        {"Table": "email_drafts", "Purpose": "Follow-up drafts and review status (later phase)"},
-        {"Table": "workflow_events", "Purpose": "Chronological audit trail of workflow events"},
-    ])
-    st.dataframe(tables_df, use_container_width=True, hide_index=True, height=225)
-
-    st.markdown("### Table record counts")
-    if st.button("Refresh database counts", type="primary"):
-        try:
-            st.session_state["db_counts"] = get_table_counts()
-        except Exception as exc:
-            show_db_error(exc)
-    if "db_counts" not in st.session_state:
-        try:
-            st.session_state["db_counts"] = get_table_counts()
-        except Exception:
-            st.session_state["db_counts"] = None
-    counts = st.session_state.get("db_counts")
-    if counts:
-        counts_df = pd.DataFrame([{"Table": name, "Records": int(count)} for name, count in counts.items()])
-        total = int(sum(counts.values()))
-        st.dataframe(counts_df, use_container_width=True, hide_index=True, height=235)
-        st.metric("Total records across these tables", total)
-        st.caption("Zero records is normal before you submit leads or add sales owners.")
-    else:
-        st.info("Connect to Neon and click “Refresh database counts” to load the record counts.")
-
-elif page == "Overview":
-    st.subheader("Sales pipeline overview")
-    try:
-        leads = get_leads()
-        total = len(leads)
-        new_count = sum(1 for lead in leads if lead.get("status") == "new")
-        qualified_count = sum(1 for lead in leads if lead.get("status") == "qualified")
-        needs_review_count = sum(1 for lead in leads if lead.get("status") == "needs_review")
-        cols = st.columns(4)
-        for col, (label, value) in zip(cols, [("Total leads", total), ("New", new_count), ("Qualified", qualified_count), ("Needs review", needs_review_count)]):
-            col.metric(label, value)
-        st.caption(f"Live database data · Refreshed {datetime.now().strftime('%d %b %Y, %H:%M')}")
-        st.subheader("Recent leads")
-        if leads:
-            st.dataframe(pd.DataFrame(leads).head(8), use_container_width=True, hide_index=True)
-        else:
-            st.info("No leads yet. Open Lead Intake to add your first test lead.")
-    except Exception as exc:
-        show_db_error(exc)
-
-elif page == "Lead Intake":
-    st.subheader("Submit a new lead")
-    st.write("Add a prospect to the database. LeadFlow checks the email address for duplicates before saving.")
-    with st.form("lead_intake_form", clear_on_submit=True):
-        c1, c2 = st.columns(2)
+if page=="Overview":
+    leads=get_leads(); counts=get_table_counts()
+    a,b,c,d=st.columns(4); a.metric("Total leads",counts["leads"]); b.metric("Qualification results",counts["qualification_results"]); c.metric("Workflow events",counts["workflow_events"]); d.metric("Needs review",sum(x.get("status")=="needs_review" for x in leads))
+    st.subheader("Recent leads"); st.dataframe(leads[:10],use_container_width=True,hide_index=True) if leads else st.info("No leads yet. Add your first lead from Lead Intake.")
+    st.caption("Potential duplicates are never merged automatically. AI recommendations are advisory.")
+elif page=="Lead Intake":
+    st.subheader("Lead Intake")
+    if st.session_state.save_message: st.success(st.session_state.save_message); st.session_state.save_message=None
+    with st.form("lead_form",clear_on_submit=False):
+        c1,c2=st.columns(2)
         with c1:
-            full_name = st.text_input("Full name *", placeholder="e.g., Ahmed Khan")
-            email = st.text_input("Work email *", placeholder="name@company.com")
-            company = st.text_input("Company", placeholder="Company name")
-            job_title = st.text_input("Job title", placeholder="e.g., Research Director")
-            website = st.text_input("Company website", placeholder="https://example.com")
-            country = st.text_input("Country", placeholder="e.g., Pakistan")
+            name=st.text_input("Contact name *"); email=st.text_input("Business email *"); company=st.text_input("Company *"); website=st.text_input("Website"); title=st.text_input("Job title")
         with c2:
-            industry = st.selectbox("Industry", ["Not specified", "Biotechnology", "Healthcare", "Pharmaceuticals", "Education / Research", "Technology / Software", "Manufacturing", "Other"])
-            company_size = st.selectbox("Company size", ["Not specified", "1–10", "11–50", "51–200", "201–500", "501–1,000", "1,001+"])
-            budget_range = st.selectbox("Budget range", ["Not specified", "Not disclosed", "Under $1,000", "$1,000–$5,000", "$5,000–$20,000", "$20,000+"])
-            timeline = st.selectbox("Expected timeline", ["Not specified", "Immediately", "Within 1 month", "Within 3 months", "3+ months", "Exploring"])
-            source = st.selectbox("Lead source", ["website_form", "referral", "LinkedIn", "email_campaign", "event", "other"])
-            consent = st.checkbox("The prospect has consented to be contacted.")
-        need_description = st.text_area("What does the prospect need? *", placeholder="Describe their challenge, goals, or service requirements.", height=130)
-        submitted = st.form_submit_button("Check for duplicates & save lead", type="primary", use_container_width=True)
-
+            industry=st.text_input("Industry"); country=st.text_input("Country"); size=st.selectbox("Company size",["","1-10","11-50","51-200","201-1000","1000+"]); budget=st.text_input("Budget"); timeline=st.selectbox("Buying timeline",["","Immediate","Within 1 month","1-3 months","3-6 months","6+ months","Unknown"])
+        desc=st.text_area("Lead notes / business need")
+        submitted=st.form_submit_button("Check lead and continue",type="primary")
     if submitted:
-        errors = []
-        if len(full_name.strip()) < 2:
-            errors.append("Enter the prospect's full name.")
-        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email.strip()):
-            errors.append("Enter a valid email address.")
-        if len(need_description.strip()) < 10:
-            errors.append("Describe the prospect's need in at least 10 characters.")
-        if website.strip() and not re.match(r"^https?://", website.strip(), re.I):
-            errors.append("Company website must start with http:// or https://.")
-        if errors:
-            for error in errors:
-                st.error(error)
+        lead={"contact_name":name.strip(),"email":email.strip(),"company":company.strip(),"website":website.strip(),"job_title":title.strip(),"industry":industry.strip(),"country":country.strip(),"company_size":size,"budget":budget.strip(),"timeline":timeline,"description":desc.strip()}
+        missing=[label for label,val in [("Contact name",lead["contact_name"]),("Email",lead["email"]),("Company",lead["company"])] if not val]
+        if missing: st.error("Please complete required fields: "+", ".join(missing))
+        elif "@" not in lead["email"] or "." not in lead["email"].split("@")[-1]: st.error("Please enter a valid email address.")
         else:
             try:
-                existing = get_lead_by_email(email.strip())
-                if existing:
-                    st.error(f"Exact duplicate: {existing['lead_reference']} already uses this email ({existing['full_name']}). No new record was created.")
-                    st.dataframe(pd.DataFrame([existing]), use_container_width=True, hide_index=True)
+                matches=find_potential_duplicates(lead)
+                exact=[x for x in matches if x.get("match_type")=="exact_email"]
+                if exact:
+                    st.error("A lead with this email already exists. Exact email duplicates cannot be saved."); st.dataframe(exact,use_container_width=True,hide_index=True)
+                    st.session_state.pending_lead=None; st.session_state.pending_matches=[]
+                elif matches:
+                    st.session_state.pending_lead=lead; st.session_state.pending_matches=matches; st.session_state.confirm_possible_duplicate=False
+                    st.success("Potential matches found. Review them below, then confirm if this is a separate lead.")
                 else:
-                    potential = find_potential_duplicates(
-                        full_name=full_name.strip(),
-                        company=company.strip(),
-                        website=website.strip(),
-                        email=email.strip()
-                    )
-                    if potential:
-                        st.warning("Potential CRM matches found. Review these records before creating another lead.")
-                        st.dataframe(pd.DataFrame(potential), use_container_width=True, hide_index=True)
-                        allow_possible_duplicate = st.checkbox(
-                            "I reviewed these matches and confirm this is a different prospect. Save this lead anyway.",
-                            key="confirm_possible_duplicate"
-                        )
-                        if not allow_possible_duplicate:
-                            st.info("No lead has been saved yet. Tick the confirmation box and submit the form again if this is a genuinely different prospect.")
-                            st.stop()
-                    record = create_lead({
-                        "full_name": full_name.strip(),
-                        "email": email.strip().lower(),
-                        "company": company.strip() or None,
-                        "job_title": job_title.strip() or None,
-                        "website": website.strip() or None,
-                        "company_size": None if company_size == "Not specified" else company_size,
-                        "industry": None if industry == "Not specified" else industry,
-                        "country": country.strip() or None,
-                        "source": source,
-                        "need_description": need_description.strip(),
-                        "budget_range": None if budget_range == "Not specified" else budget_range,
-                        "timeline": None if timeline == "Not specified" else timeline,
-                        "consent_to_contact": consent,
-                    })
-                    st.success(f"Lead saved successfully! Reference: {record['lead_reference']}")
-                    if potential:
-                        st.info("Saved after human review. Potential matches were retained as separate records; no automatic merge or deletion occurred.")
-                    else:
-                        st.info("No likely CRM matches were found. The lead has been saved.")
-
-            except Exception as exc:
-                show_db_error(exc)
-
-elif page == "All Leads":
-    st.subheader("All leads")
-    try:
-        leads = get_leads()
-        if not leads:
-            st.info("No saved leads yet. Submit one from the Lead Intake page.")
-        else:
-            search = st.text_input("Search leads", placeholder="Search by name, email, company, or reference")
-            statuses = ["All statuses"] + sorted({lead.get("status", "new") for lead in leads})
-            status_filter = st.selectbox("Filter by status", statuses)
-            filtered = leads
-            if search.strip():
-                needle = search.strip().lower()
-                filtered = [lead for lead in filtered if any(needle in str(lead.get(key) or "").lower() for key in ["lead_reference", "full_name", "email", "company", "industry"])]
-            if status_filter != "All statuses":
-                filtered = [lead for lead in filtered if lead.get("status") == status_filter]
-            st.caption(f"Showing {len(filtered)} of {len(leads)} saved leads")
-            display_columns = ["lead_reference", "full_name", "email", "company", "industry", "status", "priority", "created_at"]
-            st.dataframe(pd.DataFrame([{key: lead.get(key) for key in display_columns} for lead in filtered]), use_container_width=True, hide_index=True)
-    except Exception as exc:
-        show_db_error(exc)
-
-elif page == "AI Qualification":
-    st.subheader("AI qualification")
-    st.write("Qualification scores, categories, explanations, and recommended next actions will be added in Phase 5.")
-    st.info("Groq integration is not active in this phase.")
-
-elif page == "Assignment & Follow-up":
-    st.subheader("Assignment & follow-up")
-    left, right = st.columns(2)
-    with left:
-        st.markdown("### Sales owner assignment")
-        st.write("Owner routing rules and workload-aware assignment will be added in Phase 6.")
-    with right:
-        st.markdown("### Email draft review")
-        st.write("AI-generated drafts and human review controls will be added in Phase 7.")
-    st.info("No emails are sent by this application.")
-
-elif page == "Workflow History":
-    st.subheader("Workflow history")
-    try:
-        events = get_recent_events()
-        if events:
-            st.dataframe(pd.DataFrame(events), use_container_width=True, hide_index=True)
-        else:
-            st.info("No workflow events recorded yet. New lead submissions will appear here.")
-    except Exception as exc:
-        show_db_error(exc)
-
-st.divider()
-st.markdown('<p class="small-note">LeadFlow AI · Phase 4 · CRM duplicate intelligence, human-reviewed potential matches, persistent lead intake, and workflow event logging. AI qualification and assignment are not active yet.</p>', unsafe_allow_html=True)
+                    ref=create_lead(lead); st.session_state.save_message=f"Lead saved successfully. Reference: {ref}"; st.rerun()
+            except Exception as e: st.error(f"Lead check/save failed: {e}")
+    # Keep confirmation outside submitted branch so checkbox reruns do not discard pending lead.
+    if st.session_state.pending_lead:
+        st.warning("Possible duplicates require review.")
+        st.dataframe(st.session_state.pending_matches,use_container_width=True,hide_index=True)
+        st.checkbox("I reviewed the matches and confirm this is a separate lead.",key="confirm_possible_duplicate")
+        if st.button("Confirm and save lead",type="primary"):
+            if not st.session_state.confirm_possible_duplicate: st.error("Tick the confirmation box after reviewing matches.")
+            else:
+                try:
+                    ref=create_lead(st.session_state.pending_lead)
+                    st.session_state.save_message=f"Confirmed lead saved successfully. Reference: {ref}"
+                    st.session_state.pending_lead=None; st.session_state.pending_matches=[]; st.session_state.confirm_possible_duplicate=False
+                    st.rerun()
+                except Exception as e: st.error(f"Could not save confirmed lead: {e}")
+elif page=="All Leads":
+    st.subheader("All Leads"); leads=get_leads()
+    if not leads: st.info("No leads saved yet.")
+    else:
+        q=st.text_input("Search leads",placeholder="Name, email, company, reference")
+        statuses=sorted({str(x.get("status","new")) for x in leads}); status=st.selectbox("Filter by status",["All statuses"]+statuses)
+        filtered=[x for x in leads if q.lower() in " ".join(str(x.get(k,"")) for k in ["lead_reference","contact_name","email","company"]).lower() and (status=="All statuses" or x.get("status")==status)]
+        st.dataframe(filtered,use_container_width=True,hide_index=True)
+elif page=="AI Qualification":
+    st.subheader("Phase 5 — AI Lead Qualification"); leads=get_leads()
+    if not leads: st.info("Add a lead first using Lead Intake.")
+    else:
+        choices={f"{x.get('lead_reference')} — {x.get('contact_name')} / {x.get('company')}":x for x in leads}
+        label=st.selectbox("Select a lead to qualify",list(choices)); lead=choices[label]
+        with st.expander("Lead details",expanded=True):
+            st.write({k:lead.get(k) for k in ["email","industry","job_title","country","company_size","budget","timeline","description"]})
+        if st.button("Qualify selected lead with AI",type="primary"):
+            with st.spinner("Groq is assessing the lead…"):
+                try:
+                    result=qualify(lead); save_qualification_result(lead["id"],result); update_lead_qualification(lead["id"],result["category"],result["priority"])
+                    st.session_state.last_qualification={"lead_reference":lead["lead_reference"],**result}
+                    st.success("Qualification saved to Neon. Review the recommendation before acting.")
+                except Exception as e: st.error(f"Qualification failed; no result was saved: {e}")
+        last=st.session_state.last_qualification
+        if last and last.get("lead_reference")==lead.get("lead_reference"):
+            st.markdown("### Latest AI assessment")
+            a,b,c=st.columns(3); a.metric("Fit score",f"{last['score']}/100"); b.metric("Category",last["category"].replace("_"," ").title()); c.metric("Priority",last["priority"].title())
+            st.write("**Reasoning**"); st.write(last["reasoning"]); st.write("**Missing information**")
+            st.write("\n".join("- "+x for x in last["missing_information"]) if last["missing_information"] else "No key missing information identified.")
+            st.write("**Recommended next action**"); st.info(last["recommended_next_action"])
+            st.warning("Human review required: "+("Yes" if last["human_review_required"] else "AI marked review optional; verify before action."))
+        history=get_qualification_results(lead["id"])
+        if history: st.markdown("### Saved qualification history"); st.dataframe(history,use_container_width=True,hide_index=True)
+elif page=="Workflow History":
+    st.subheader("Workflow History"); events=get_workflow_events()
+    st.dataframe(events,use_container_width=True,hide_index=True) if events else st.info("No workflow events recorded yet.")
+elif page=="Database Setup":
+    st.subheader("Database Setup"); st.success("Connected to Neon PostgreSQL.")
+    st.dataframe([{"Table":k,"Records":v} for k,v in get_table_counts().items()],use_container_width=True,hide_index=True)
+    st.caption("Expected tables: leads, sales_owners, qualification_results, email_drafts, workflow_events.")
