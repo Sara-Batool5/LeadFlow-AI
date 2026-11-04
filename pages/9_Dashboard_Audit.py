@@ -134,7 +134,6 @@ st.markdown(
         font-size: 1rem;
         font-weight: 600;
     }
-
     </style>
     """,
     unsafe_allow_html=True,
@@ -197,10 +196,17 @@ def show_empty(message):
     st.info(message)
 
 
+def detail_metric(label, value):
+    st.metric(label, value if value is not None else "—")
+
+
+# ============================================================
+# EVENT DETAIL FORMATTERS
+# ============================================================
+
 def show_qualification_details(details):
-    """
-    Display AI qualification event details in a readable format.
-    """
+
+    st.subheader("AI Qualification Result")
 
     score = details.get("score")
     category = details.get("category")
@@ -209,23 +215,21 @@ def show_qualification_details(details):
     human_review = details.get("human_review_required")
     next_action = details.get("recommended_next_action")
 
-    st.subheader("AI Qualification Result")
+    col1, col2, col3 = st.columns(3)
 
-    score_col, category_col, review_col = st.columns(3)
-
-    with score_col:
-        st.metric(
+    with col1:
+        detail_metric(
             "Qualification Score",
             f"{score}/100" if score is not None else "—",
         )
 
-    with category_col:
-        st.metric(
+    with col2:
+        detail_metric(
             "Qualification Category",
             humanize_value(category) if category else "—",
         )
 
-    with review_col:
+    with col3:
         if human_review is True:
             review_label = "Required"
         elif human_review is False:
@@ -233,27 +237,22 @@ def show_qualification_details(details):
         else:
             review_label = "Not Specified"
 
-        st.metric(
-            "Human Review",
-            review_label,
-        )
+        detail_metric("Human Review", review_label)
 
     st.markdown("#### AI Reasoning")
 
     if reasoning:
         st.info(reasoning)
     else:
-        st.write("No reasoning was stored for this event.")
+        st.write("No reasoning was stored.")
 
     st.markdown("#### Missing Information")
 
     if isinstance(missing_information, list) and missing_information:
         for item in missing_information:
             st.markdown(f"- {humanize_value(item)}")
-
     elif missing_information:
         st.write(missing_information)
-
     else:
         st.success("No missing information was recorded.")
 
@@ -265,43 +264,289 @@ def show_qualification_details(details):
         st.write("No next action was recorded.")
 
 
-def show_event_details(details):
-    """
-    Choose a readable display based on the event's stored details.
-    """
+def show_agent_email_draft_created(details):
+
+    st.subheader("AI Email Draft Generation")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        detail_metric(
+            "Email Draft ID",
+            details.get("email_draft_id"),
+        )
+
+        detail_metric(
+            "Email Sent",
+            "Yes" if details.get("email_sent") is True else "No",
+        )
+
+    with col2:
+        detail_metric(
+            "Approval Required",
+            "Yes" if details.get("approval_required") else "No",
+        )
+
+    st.markdown("#### Email Subject")
+
+    st.info(details.get("subject") or "No subject recorded.")
+
+    st.caption(
+        "This event records draft generation. It does not mean an email was sent."
+    )
+
+
+def show_email_draft_created(details):
+
+    st.subheader("Email Draft Created")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        detail_metric(
+            "Draft ID",
+            details.get("email_draft_id"),
+        )
+
+    with col2:
+        detail_metric(
+            "Draft Status",
+            humanize_value(details.get("draft_status")),
+        )
+
+    with col3:
+        detail_metric(
+            "Recipient",
+            details.get("recipient_email"),
+        )
+
+    st.markdown("#### Email Subject")
+
+    st.info(details.get("subject") or "No subject recorded.")
+
+    st.caption(
+        "An email draft was created and is awaiting the applicable review process."
+    )
+
+
+def show_owner_assignment(details):
+
+    st.subheader("Automatic Sales Owner Assignment")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        detail_metric(
+            "Assigned Owner",
+            details.get("owner_name"),
+        )
+
+    with col2:
+        detail_metric(
+            "Owner ID",
+            details.get("owner_id"),
+        )
+
+    with col3:
+        detail_metric(
+            "Specialization",
+            humanize_value(details.get("specialization")),
+        )
+
+    st.markdown("#### Owner Workload")
+
+    workload_col1, workload_col2, workload_col3 = st.columns(3)
+
+    with workload_col1:
+        detail_metric(
+            "Active Leads",
+            details.get("active_leads"),
+        )
+
+    with workload_col2:
+        detail_metric(
+            "Maximum Lead Capacity",
+            details.get("active_lead_limit"),
+        )
+
+    with workload_col3:
+        active = details.get("active_leads")
+        limit = details.get("active_lead_limit")
+
+        if active is not None and limit is not None:
+            remaining = max(int(limit) - int(active), 0)
+        else:
+            remaining = None
+
+        detail_metric("Remaining Capacity", remaining)
+
+
+def show_lead_created(details):
+
+    st.subheader("Lead Created by Agent Workflow")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        detail_metric(
+            "Workflow",
+            details.get("workflow"),
+        )
+
+    with col2:
+        detail_metric(
+            "Lead Reference",
+            details.get("lead_reference"),
+        )
+
+    st.success(
+        "The lead creation event was successfully recorded in the workflow history."
+    )
+
+
+def show_email_skipped(details):
+
+    st.subheader("Email Draft Skipped")
+
+    reason = details.get("reason")
+
+    if reason == "consent_not_recorded":
+        st.warning(
+            "The email draft was not generated because contact consent "
+            "was not recorded for this lead."
+        )
+    else:
+        st.info(
+            f"Email generation was skipped. Reason: {humanize_value(reason)}"
+        )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        detail_metric(
+            "Skip Reason",
+            humanize_value(reason),
+        )
+
+    with col2:
+        detail_metric(
+            "Draft Created",
+            "Yes" if details.get("draft_created") is True else "No",
+        )
+
+
+def show_email_approved(details):
+
+    st.subheader("Email Draft Approved")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        detail_metric(
+            "Email Draft ID",
+            details.get("email_draft_id"),
+        )
+
+    with col2:
+        detail_metric(
+            "Recipient",
+            details.get("recipient_email"),
+        )
+
+    st.markdown("#### Approved Email Subject")
+
+    st.info(details.get("subject") or "No subject recorded.")
+
+    st.success(
+        "The email draft approval action was recorded."
+    )
+
+
+def show_email_updated(details):
+
+    st.subheader("Email Draft Updated")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        detail_metric(
+            "Email Draft ID",
+            details.get("email_draft_id"),
+        )
+
+    with col2:
+        detail_metric(
+            "Current Draft Status",
+            humanize_value(details.get("draft_status")),
+        )
+
+    st.markdown("#### Email Subject")
+
+    st.info(details.get("subject") or "No subject recorded.")
+
+    st.markdown("#### Recipient")
+
+    st.write(details.get("recipient_email") or "—")
+
+
+def show_generic_details(details):
+
+    st.subheader("Additional Event Information")
+
+    if not details:
+        st.info("No additional event details were recorded.")
+        return
+
+    if isinstance(details, dict):
+        for key, value in details.items():
+            st.markdown(f"**{humanize_value(key)}**")
+
+            if isinstance(value, (dict, list)):
+                st.write(value)
+            else:
+                st.write(value)
+
+    else:
+        st.write(details)
+
+
+def show_event_details(event):
+
+    details = safe_json(event.get("details"))
+    event_type = str(event.get("event_type") or "").strip()
 
     if not details:
         st.info("No additional details were stored for this event.")
         return
 
     if not isinstance(details, dict):
-        st.json(details)
+        show_generic_details(details)
         return
 
-    qualification_keys = {
-        "score",
-        "category",
-        "reasoning",
-        "missing_information",
-        "human_review_required",
-        "recommended_next_action",
+    # Match the event type to its corresponding readable formatter.
+
+    event_formatters = {
+        "agent_ai_qualification_completed": show_qualification_details,
+        "agent_email_draft_created": show_agent_email_draft_created,
+        "email_draft_created": show_email_draft_created,
+        "automatic_owner_assignment": show_owner_assignment,
+        "agent_workflow_lead_created": show_lead_created,
+        "agent_email_skipped_no_consent": show_email_skipped,
+        "email_draft_approved": show_email_approved,
+        "email_draft_updated": show_email_updated,
     }
 
-    if qualification_keys.intersection(details.keys()):
-        show_qualification_details(details)
+    formatter = event_formatters.get(event_type)
 
-        other_details = {
-            key: value
-            for key, value in details.items()
-            if key not in qualification_keys
-        }
-
-        if other_details:
-            with st.expander("Other stored event information"):
-                st.json(other_details)
+    if formatter:
+        formatter(details)
 
     else:
-        st.json(details)
+        st.info(
+            "This event type does not yet have a dedicated display format. "
+            "Its stored fields are shown below."
+        )
+        show_generic_details(details)
 
 
 # ============================================================
@@ -310,6 +555,7 @@ def show_event_details(details):
 
 @st.cache_data(ttl=30, show_spinner=False)
 def load_dashboard_data():
+
     leads = get_leads()
     owners = get_owner_workloads()
     drafts = get_email_drafts()
@@ -318,6 +564,7 @@ def load_dashboard_data():
     qualification_map = {}
 
     for lead in leads:
+
         lead_id = lead.get("id")
 
         if lead_id is None:
@@ -378,10 +625,12 @@ with header_col2:
 # ============================================================
 
 try:
+
     with st.spinner("Loading dashboard information from Neon..."):
         data = load_dashboard_data()
 
 except Exception as exc:
+
     st.error("Unable to load dashboard information from the database.")
     st.exception(exc)
     st.stop()
@@ -427,6 +676,7 @@ category_counts = {
 }
 
 for lead_id, result in qualifications.items():
+
     category = normalize_category(result.get("category"))
 
     if category in category_counts:
@@ -497,24 +747,29 @@ st.caption(
 status_counts = {}
 
 for lead in leads:
+
     status = str(lead.get("status") or "unknown").strip().lower()
     status_counts[status] = status_counts.get(status, 0) + 1
 
 priority_counts = {}
 
 for lead in leads:
+
     priority = str(
         lead.get("priority") or "unassessed"
     ).strip().lower()
 
     priority_counts[priority] = priority_counts.get(priority, 0) + 1
 
+
 pipeline_col1, pipeline_col2 = st.columns(2)
 
 with pipeline_col1:
+
     st.subheader("Leads by Status")
 
     if status_counts:
+
         status_df = pd.DataFrame(
             [
                 {
@@ -537,13 +792,17 @@ with pipeline_col1:
             use_container_width=True,
             hide_index=True,
         )
+
     else:
         show_empty("No lead status information is available.")
 
+
 with pipeline_col2:
+
     st.subheader("Leads by Priority")
 
     if priority_counts:
+
         priority_df = pd.DataFrame(
             [
                 {
@@ -566,8 +825,10 @@ with pipeline_col2:
             use_container_width=True,
             hide_index=True,
         )
+
     else:
         show_empty("No priority information is available.")
+
 
 st.divider()
 
@@ -585,6 +846,7 @@ st.caption(
 qualification_col1, qualification_col2 = st.columns(2)
 
 with qualification_col1:
+
     st.subheader("Qualification Categories")
 
     qualification_labels = {
@@ -605,23 +867,28 @@ with qualification_col1:
     )
 
     if sum(category_counts.values()) > 0:
+
         st.bar_chart(
             qualification_df,
             x="Category",
             y="Leads",
             use_container_width=True,
         )
+
     else:
         show_empty(
             "No AI qualification results have been saved yet."
         )
 
+
 with qualification_col2:
+
     st.subheader("Latest Qualification Records")
 
     qualification_rows = []
 
     for lead in leads:
+
         result = qualifications.get(lead.get("id"))
 
         if not result:
@@ -643,13 +910,16 @@ with qualification_col2:
         )
 
     if qualification_rows:
+
         st.dataframe(
             qualification_rows,
             use_container_width=True,
             hide_index=True,
         )
+
     else:
         show_empty("No qualification records are available.")
+
 
 st.divider()
 
@@ -665,9 +935,11 @@ st.caption(
 )
 
 if owners:
+
     owner_rows = []
 
     for owner in owners:
+
         active = int(owner.get("active_leads") or 0)
         capacity = int(owner.get("active_lead_limit") or 0)
 
@@ -715,10 +987,12 @@ if owners:
     )
 
 else:
+
     show_empty(
         "No sales owners have been added yet. "
         "Add owners in Assignment & Follow-up."
     )
+
 
 st.divider()
 
@@ -730,9 +1004,11 @@ st.divider()
 st.header("Recent Leads")
 
 if leads:
+
     recent_leads = []
 
     for lead in leads[:10]:
+
         qualification = qualifications.get(lead.get("id"))
 
         recent_leads.append(
@@ -759,7 +1035,9 @@ if leads:
     )
 
 else:
+
     show_empty("No leads have been submitted yet.")
+
 
 st.divider()
 
@@ -775,9 +1053,11 @@ st.caption(
 )
 
 if events:
+
     recent_events = []
 
     for event in events[:12]:
+
         recent_events.append(
             {
                 "Time": format_datetime(event.get("created_at")),
@@ -797,7 +1077,9 @@ if events:
     )
 
 else:
+
     show_empty("No workflow events have been recorded yet.")
+
 
 st.divider()
 
@@ -809,15 +1091,17 @@ st.divider()
 st.header("Workflow Audit Explorer")
 
 st.caption(
-    "Search and inspect workflow events, including the stored event details."
+    "Search and inspect workflow events, including readable stored event details."
 )
 
 if not events:
+
     show_empty(
         "No audit events are available. Run a lead workflow to generate events."
     )
 
 else:
+
     event_types = sorted(
         {
             str(event.get("event_type") or "unknown")
@@ -835,18 +1119,21 @@ else:
     filter_col1, filter_col2, filter_col3 = st.columns(3)
 
     with filter_col1:
+
         selected_event_type = st.selectbox(
             "Event type",
             ["All event types"] + event_types,
         )
 
     with filter_col2:
+
         selected_event_status = st.selectbox(
             "Event status",
             ["All statuses"] + event_statuses,
         )
 
     with filter_col3:
+
         audit_search = st.text_input(
             "Search audit history",
             placeholder="Lead, contact, event, actor...",
@@ -855,6 +1142,7 @@ else:
     filtered_events = events
 
     if selected_event_type != "All event types":
+
         filtered_events = [
             event for event in filtered_events
             if str(event.get("event_type") or "unknown")
@@ -862,6 +1150,7 @@ else:
         ]
 
     if selected_event_status != "All statuses":
+
         filtered_events = [
             event for event in filtered_events
             if str(event.get("event_status") or "unknown")
@@ -869,6 +1158,7 @@ else:
         ]
 
     if audit_search.strip():
+
         term = audit_search.strip().lower()
 
         filtered_events = [
@@ -891,9 +1181,11 @@ else:
     )
 
     if filtered_events:
+
         audit_rows = []
 
         for event in filtered_events:
+
             audit_rows.append(
                 {
                     "Event ID": event.get("id"),
@@ -938,6 +1230,7 @@ else:
         detail_col1, detail_col2 = st.columns(2)
 
         with detail_col1:
+
             st.markdown("**Event Information**")
             st.write(f"Event ID: {selected_event.get('id')}")
             st.write(f"Event type: {selected_event.get('event_type')}")
@@ -948,26 +1241,29 @@ else:
             )
 
         with detail_col2:
+
             st.markdown("**Associated Lead**")
             st.write(
                 selected_event.get("lead_reference") or "System event"
             )
             st.write(selected_event.get("contact_name") or "—")
             st.write(selected_event.get("company") or "—")
+
             st.markdown("**Event Message**")
             st.write(selected_event.get("message") or "No message.")
 
         st.divider()
+
         st.markdown("### Stored Event Details")
 
-        details = safe_json(selected_event.get("details"))
-
-        show_event_details(details)
+        show_event_details(selected_event)
 
     else:
+
         show_empty(
             "No events match the selected filters."
         )
+
 
 st.divider()
 
@@ -985,9 +1281,11 @@ draft_col2.metric("Pending Review", len(pending_drafts))
 draft_col3.metric("Approved", len(approved_drafts))
 
 if drafts:
+
     draft_rows = []
 
     for draft in drafts[:15]:
+
         draft_rows.append(
             {
                 "Draft ID": draft.get("id"),
@@ -1007,6 +1305,7 @@ if drafts:
     )
 
 else:
+
     show_empty("No email drafts have been generated yet.")
 
 
