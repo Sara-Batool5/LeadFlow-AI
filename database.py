@@ -352,6 +352,32 @@ def update_lead_status(lead_id, status):
 
 
 def update_lead_qualification(lead_id, score, category):
+    """
+    Store the AI qualification category separately from lead priority.
+
+    qualification_results.category uses:
+    high_fit, medium_fit, low_fit, needs_review
+
+    leads.priority uses:
+    unassessed, low, medium, high, urgent
+    """
+
+    category_normalized = (
+        _clean(category).lower().replace(" ", "_").replace("-", "_")
+    )
+
+    priority_mapping = {
+        "high_fit": "high",
+        "medium_fit": "medium",
+        "low_fit": "low",
+        "needs_review": "unassessed",
+    }
+
+    lead_priority = priority_mapping.get(
+        category_normalized,
+        "unassessed",
+    )
+
     with _connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -360,9 +386,8 @@ def update_lead_qualification(lead_id, score, category):
                 SET priority = %s, updated_at = NOW()
                 WHERE id = %s;
                 """,
-                (category, lead_id),
+                (lead_priority, lead_id),
             )
-
 
 # ============================================================
 # QUALIFICATION RESULTS
