@@ -6,7 +6,27 @@ import re
 import streamlit as st
 from groq import Groq
 
-from database import *
+from database import (
+    get_database_url,
+    test_connection,
+    initialize_schema,
+    get_table_counts,
+    find_potential_duplicates,
+    create_lead,
+    get_leads,
+    get_lead_by_id,
+    get_workflow_events,
+    save_qualification_result,
+    update_lead_qualification,
+    get_qualification_results,
+    get_sales_owners,
+    create_sales_owner,
+    update_sales_owner_availability,
+    get_owner_workloads,
+    assign_lead_automatically,
+    assign_lead_owner,
+    unassign_lead_owner,
+)
 
 
 # ============================================================
@@ -19,75 +39,63 @@ st.set_page_config(
     layout="wide"
 )
 
-st.markdown(
-    """
-    <style>
-        .stApp {
-            background: linear-gradient(
-                135deg,
-                #10101d,
-                #17132b,
-                #20143b
-            );
-            color: #f5f3ff;
-        }
+st.markdown("""
+<style>
+.stApp {
+    background: linear-gradient(135deg, #10101d, #17132b, #20143b);
+    color: #f5f3ff;
+}
 
-        [data-testid="stSidebar"] {
-            background: #11101d;
-        }
+[data-testid="stSidebar"] {
+    background: #11101d;
+}
 
-        h1, h2, h3, p, label {
-            color: #f5f3ff;
-        }
+h1, h2, h3, p, label {
+    color: #f5f3ff;
+}
 
-        div[data-testid="stMetricValue"] {
-            color: #d8b4fe;
-        }
+div[data-testid="stMetricValue"] {
+    color: #d8b4fe;
+}
 
-        .stButton > button {
-            border-radius: 10px;
-            border: 1px solid #8b5cf6;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+.stButton > button {
+    border-radius: 10px;
+    border: 1px solid #8b5cf6;
+}
+
+div[data-testid="stDataFrame"] {
+    border: 1px solid #39304f;
+}
+</style>
+""", unsafe_allow_html=True)
 
 
 # ============================================================
-# APPLICATION HEADER
+# APPLICATION HEADER AND NAVIGATION
 # ============================================================
 
 st.title("🟣 LeadFlow AI")
 
 st.caption(
-    "Lead intake, duplicate intelligence, and AI-assisted qualification"
+    "AI-powered lead qualification, intelligent owner assignment, "
+    "and follow-up workflow"
 )
 
-
-# ============================================================
-# SESSION STATE
-# ============================================================
-
-session_defaults = {
+SESSION_DEFAULTS = {
     "pending_lead": None,
     "pending_matches": [],
     "confirm_possible_duplicate": False,
     "save_message": None,
-    "last_qualification": None
+    "last_qualification": None,
+    "assignment_message": None,
 }
 
-for key, value in session_defaults.items():
+for key, value in SESSION_DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
 
-# ============================================================
-# SIDEBAR NAVIGATION
-# ============================================================
-
 with st.sidebar:
-
     st.markdown("## LeadFlow AI")
 
     page = st.radio(
@@ -97,8 +105,9 @@ with st.sidebar:
             "Lead Intake",
             "All Leads",
             "AI Qualification",
+            "Assignment & Follow-up",
             "Workflow History",
-            "Database Setup"
+            "Database Setup",
         ]
     )
 
@@ -110,55 +119,42 @@ with st.sidebar:
 # ============================================================
 
 try:
+    get_database_url()
 
-    if not get_database_url():
+    connection_ok, connection_message = test_connection()
 
-        st.warning(
-            "Add NEON_DATABASE_URL in "
-            "Streamlit Community Cloud → App settings → Secrets."
-        )
-
-        st.stop()
-
-    if not test_connection():
-
+    if not connection_ok:
         st.error(
-            "Could not connect to Neon. "
-            "Please check your NEON_DATABASE_URL."
+            f"Could not connect to Neon PostgreSQL: {connection_message}"
         )
-
         st.stop()
 
     initialize_schema()
 
-except Exception as e:
-
-    st.error(f"Database setup failed: {e}")
-
+except Exception as exc:
+    st.error(f"Database setup failed: {exc}")
     st.stop()
 
 
 # ============================================================
-# AI LEAD QUALIFICATION FUNCTION
+# GROQ AI QUALIFICATION
 # ============================================================
 
-def qualify(lead):
+def qualify_lead(lead):
 
-    key = None
+    api_key = None
 
     try:
-        key = st.secrets.get("GROQ_API_KEY")
+        api_key = st.secrets.get("GROQ_API_KEY")
     except Exception:
         pass
 
-    key = key or os.getenv("GROQ_API_KEY")
+    api_key = api_key or os.getenv("GROQ_API_KEY")
 
-    if not key:
-
+    if not api_key:
         raise RuntimeError(
-            "GROQ_API_KEY is missing. Add it in "
-            "Streamlit Community Cloud → App settings → Secrets. "
-            "Never put it in GitHub or chat."
+            "GROQ_API_KEY is missing. Add it in Streamlit Cloud secrets. "
+            "Do not put your API key in GitHub."
         )
 
     model = None
@@ -189,21 +185,21 @@ def qualify(lead):
         "description"
     ]
 
-    data = {
-        field: lead.get(field)
-        for field in fields
+    facts = {
+        key: lead.get(key)
+        for key in fields
     }
 
     prompt = f"""
 Assess this B2B sales lead using only the supplied facts.
 Do not invent details.
 
-Return valid JSON only with these fields:
+Return valid JSON only with:
 
 - score: integer from 0 to 100
 - category: high_fit, medium_fit, low_fit, or needs_review
 - priority: urgent, high, medium, or low
-- reasoning: string
+- reasoning: short explanation
 - missing_information: array of strings
 - recommended_next_action: string
 - human_review_required: boolean
@@ -212,17 +208,17 @@ Use needs_review when evidence is insufficient.
 
 This is decision support, not a final decision.
 
-Lead:
-{json.dumps(data, default=str)}
+Lead facts:
+{json.dumps(facts, default=str)}
 """
 
-    response = Groq(api_key=key).chat.completions.create(
+    response = Groq(api_key=api_key).chat.completions.create(
         model=model,
         messages=[
             {
                 "role": "system",
                 "content": (
-                    "You are a cautious sales qualification assistant. "
+                    "You are a cautious B2B sales qualification assistant. "
                     "Return valid JSON only."
                 )
             },
@@ -235,31 +231,32 @@ Lead:
         max_tokens=900
     )
 
+    raw = response.choices[0].message.content or ""
+
     raw = re.sub(
         r"^\s*```(?:json)?\s*|\s*```\s*$",
         "",
-        response.choices[0].message.content or "",
+        raw,
         flags=re.I
     )
 
     match = re.search(r"\{.*\}", raw, re.S)
 
     if not match:
-
         raise ValueError(
             "The AI response was not valid JSON. Please retry."
         )
 
-    result = json.loads(match.group())
+    data = json.loads(match.group())
 
-    allowed_categories = {
+    valid_categories = {
         "high_fit",
         "medium_fit",
         "low_fit",
         "needs_review"
     }
 
-    allowed_priorities = {
+    valid_priorities = {
         "urgent",
         "high",
         "medium",
@@ -267,32 +264,29 @@ Lead:
     }
 
     category = str(
-        result.get("category", "needs_review")
+        data.get("category", "needs_review")
     ).lower()
 
-    priority = str(
-        result.get("priority", "medium")
-    ).lower()
-
-    if category not in allowed_categories:
+    if category not in valid_categories:
         category = "needs_review"
 
-    if priority not in allowed_priorities:
+    priority = str(
+        data.get("priority", "medium")
+    ).lower()
+
+    if priority not in valid_priorities:
         priority = "medium"
 
     try:
-
         score = max(
             0,
-            min(100, int(result.get("score", 0)))
+            min(100, int(data.get("score", 0)))
         )
-
-    except (ValueError, TypeError):
-
+    except (TypeError, ValueError):
         score = 0
         category = "needs_review"
 
-    missing = result.get("missing_information", [])
+    missing = data.get("missing_information", [])
 
     if not isinstance(missing, list):
         missing = [str(missing)]
@@ -303,73 +297,74 @@ Lead:
         "category": category,
         "priority": priority,
         "reasoning": str(
-            result.get("reasoning", "No explanation supplied.")
+            data.get("reasoning", "No explanation supplied.")
         ),
         "missing_information": [
             str(item) for item in missing
         ],
         "recommended_next_action": str(
-            result.get(
+            data.get(
                 "recommended_next_action",
                 "Review this lead manually."
             )
         ),
         "human_review_required": bool(
-            result.get("human_review_required", True)
-        )
+            data.get("human_review_required", True)
+        ),
     }
 
 
 # ============================================================
-# PAGE 1: OVERVIEW
+# OVERVIEW
 # ============================================================
 
 if page == "Overview":
 
-    st.subheader("Overview")
-
     leads = get_leads()
     counts = get_table_counts()
 
-    col1, col2, col3, col4 = st.columns(4)
+    unassigned = [
+        lead
+        for lead in leads
+        if lead.get("assigned_owner_id") is None
+    ]
 
-    col1.metric(
-        "Total Leads",
-        counts["leads"]
-    )
+    a, b, c, d, e = st.columns(5)
 
-    col2.metric(
-        "Qualification Results",
+    a.metric("Total leads", counts["leads"])
+
+    b.metric(
+        "Qualification results",
         counts["qualification_results"]
     )
 
-    col3.metric(
-        "Workflow Events",
-        counts["workflow_events"]
+    c.metric(
+        "Sales owners",
+        counts["sales_owners"]
     )
 
-    col4.metric(
-        "Needs Review",
+    d.metric(
+        "Unassigned leads",
+        len(unassigned)
+    )
+
+    e.metric(
+        "Needs review",
         sum(
             lead.get("status") == "needs_review"
             for lead in leads
         )
     )
 
-    st.divider()
-
     st.subheader("Recent Leads")
 
     if leads:
-
         st.dataframe(
             leads[:10],
             use_container_width=True,
             hide_index=True
         )
-
     else:
-
         st.info(
             "No leads yet. Add your first lead from Lead Intake."
         )
@@ -381,7 +376,7 @@ if page == "Overview":
 
 
 # ============================================================
-# PAGE 2: LEAD INTAKE
+# LEAD INTAKE
 # ============================================================
 
 elif page == "Lead Intake":
@@ -389,9 +384,7 @@ elif page == "Lead Intake":
     st.subheader("Lead Intake")
 
     if st.session_state.save_message:
-
         st.success(st.session_state.save_message)
-
         st.session_state.save_message = None
 
     with st.form(
@@ -399,27 +392,20 @@ elif page == "Lead Intake":
         clear_on_submit=False
     ):
 
-        col1, col2 = st.columns(2)
+        left, right = st.columns(2)
 
-        with col1:
-
+        with left:
             name = st.text_input("Contact name *")
-
             email = st.text_input("Business email *")
-
             company = st.text_input("Company *")
-
             website = st.text_input("Website")
+            job_title = st.text_input("Job title")
 
-            title = st.text_input("Job title")
-
-        with col2:
-
+        with right:
             industry = st.text_input("Industry")
-
             country = st.text_input("Country")
 
-            size = st.selectbox(
+            company_size = st.selectbox(
                 "Company size",
                 [
                     "",
@@ -446,7 +432,7 @@ elif page == "Lead Intake":
                 ]
             )
 
-        desc = st.text_area(
+        description = st.text_area(
             "Lead notes / business need"
         )
 
@@ -457,54 +443,51 @@ elif page == "Lead Intake":
 
     if submitted:
 
-        lead = {
+        lead_data = {
             "contact_name": name.strip(),
             "email": email.strip(),
             "company": company.strip(),
             "website": website.strip(),
-            "job_title": title.strip(),
+            "job_title": job_title.strip(),
             "industry": industry.strip(),
             "country": country.strip(),
-            "company_size": size,
+            "company_size": company_size,
             "budget": budget.strip(),
             "timeline": timeline,
-            "description": desc.strip()
+            "description": description.strip(),
         }
 
         missing = [
             label
             for label, value in [
-                ("Contact name", lead["contact_name"]),
-                ("Email", lead["email"]),
-                ("Company", lead["company"])
+                ("Contact name", lead_data["contact_name"]),
+                ("Email", lead_data["email"]),
+                ("Company", lead_data["company"]),
             ]
             if not value
         ]
 
         if missing:
-
             st.error(
                 "Please complete required fields: "
                 + ", ".join(missing)
             )
 
         elif (
-            "@" not in lead["email"]
-            or "." not in lead["email"].split("@")[-1]
+            "@" not in lead_data["email"]
+            or "." not in lead_data["email"].split("@")[-1]
         ):
-
             st.error("Please enter a valid email address.")
 
         else:
 
             try:
-
-                matches = find_potential_duplicates(lead)
+                matches = find_potential_duplicates(lead_data)
 
                 exact_matches = [
-                    item
-                    for item in matches
-                    if item.get("match_type") == "exact_email"
+                    row
+                    for row in matches
+                    if row.get("match_type") == "exact_email"
                 ]
 
                 if exact_matches:
@@ -525,20 +508,25 @@ elif page == "Lead Intake":
 
                 elif matches:
 
-                    st.session_state.pending_lead = lead
-
+                    st.session_state.pending_lead = lead_data
                     st.session_state.pending_matches = matches
-
                     st.session_state.confirm_possible_duplicate = False
 
-                    st.success(
+                    st.warning(
                         "Potential matches found. Review them below, "
                         "then confirm if this is a separate lead."
                     )
 
                 else:
 
-                    reference = create_lead(lead)
+                    new_id = create_lead(lead_data)
+
+                    saved = get_lead_by_id(new_id)
+
+                    reference = (
+                        saved["lead_reference"]
+                        if saved else str(new_id)
+                    )
 
                     st.session_state.save_message = (
                         "Lead saved successfully. "
@@ -547,11 +535,10 @@ elif page == "Lead Intake":
 
                     st.rerun()
 
-            except Exception as e:
-
-                st.error(f"Lead check/save failed: {e}")
-
-    # Potential duplicate confirmation
+            except Exception as exc:
+                st.error(
+                    f"Lead check/save failed: {exc}"
+                )
 
     if st.session_state.pending_lead:
 
@@ -582,9 +569,15 @@ elif page == "Lead Intake":
             else:
 
                 try:
-
-                    reference = create_lead(
+                    new_id = create_lead(
                         st.session_state.pending_lead
+                    )
+
+                    saved = get_lead_by_id(new_id)
+
+                    reference = (
+                        saved["lead_reference"]
+                        if saved else str(new_id)
                     )
 
                     st.session_state.save_message = (
@@ -598,15 +591,14 @@ elif page == "Lead Intake":
 
                     st.rerun()
 
-                except Exception as e:
-
+                except Exception as exc:
                     st.error(
-                        f"Could not save confirmed lead: {e}"
+                        f"Could not save confirmed lead: {exc}"
                     )
 
 
 # ============================================================
-# PAGE 3: ALL LEADS
+# ALL LEADS
 # ============================================================
 
 elif page == "All Leads":
@@ -621,13 +613,13 @@ elif page == "All Leads":
 
     else:
 
-        search_query = st.text_input(
+        search = st.text_input(
             "Search leads",
-            placeholder="Name, email, company, reference"
+            placeholder="Name, email, company, or reference"
         )
 
         statuses = sorted({
-            str(lead.get("status", "new"))
+            str(lead.get("status") or "new")
             for lead in leads
         })
 
@@ -636,21 +628,19 @@ elif page == "All Leads":
             ["All statuses"] + statuses
         )
 
-        filtered_leads = [
+        filtered = [
             lead
             for lead in leads
-            if (
-                search_query.lower()
-                in " ".join(
-                    str(lead.get(field, ""))
-                    for field in [
-                        "lead_reference",
-                        "contact_name",
-                        "email",
-                        "company"
-                    ]
-                ).lower()
-            )
+            if search.lower() in " ".join(
+                str(lead.get(key) or "")
+                for key in [
+                    "lead_reference",
+                    "contact_name",
+                    "email",
+                    "company",
+                    "assigned_owner_name"
+                ]
+            ).lower()
             and (
                 selected_status == "All statuses"
                 or lead.get("status") == selected_status
@@ -658,18 +648,14 @@ elif page == "All Leads":
         ]
 
         st.dataframe(
-            filtered_leads,
+            filtered,
             use_container_width=True,
             hide_index=True
         )
 
-        st.caption(
-            f"Showing {len(filtered_leads)} of {len(leads)} leads."
-        )
-
 
 # ============================================================
-# PAGE 4: AI QUALIFICATION
+# AI QUALIFICATION
 # ============================================================
 
 elif page == "AI Qualification":
@@ -700,59 +686,74 @@ elif page == "AI Qualification":
 
         lead = choices[selected_label]
 
-        # Display lead details in a readable format
-
         with st.expander(
-            "Lead Details",
+            "Lead details",
             expanded=True
         ):
 
-            details = [
-                ("Email", lead.get("email")),
-                ("Industry", lead.get("industry")),
-                ("Job Title", lead.get("job_title")),
-                ("Country", lead.get("country")),
-                ("Company Size", lead.get("company_size")),
-                ("Budget", lead.get("budget")),
-                ("Buying Timeline", lead.get("timeline")),
-                (
-                    "Business Need / Description",
+            detail_left, detail_right = st.columns(2)
+
+            with detail_left:
+                st.write(
+                    "**Contact:**",
+                    lead.get("contact_name")
+                )
+
+                st.write(
+                    "**Email:**",
+                    lead.get("email")
+                )
+
+                st.write(
+                    "**Company:**",
+                    lead.get("company")
+                )
+
+                st.write(
+                    "**Industry:**",
+                    lead.get("industry")
+                )
+
+                st.write(
+                    "**Job title:**",
+                    lead.get("job_title")
+                )
+
+            with detail_right:
+                st.write(
+                    "**Company size:**",
+                    lead.get("company_size")
+                )
+
+                st.write(
+                    "**Country:**",
+                    lead.get("country")
+                )
+
+                st.write(
+                    "**Budget:**",
+                    lead.get("budget")
+                )
+
+                st.write(
+                    "**Timeline:**",
+                    lead.get("timeline")
+                )
+
+                st.write(
+                    "**Business need:**",
                     lead.get("description")
                 )
-            ]
-
-            col1, col2 = st.columns(2)
-
-            for index, (label, value) in enumerate(details):
-
-                target_col = (
-                    col1 if index % 2 == 0 else col2
-                )
-
-                with target_col:
-
-                    st.markdown(f"**{label}**")
-
-                    st.write(
-                        value
-                        if value not in (None, "")
-                        else "Not provided"
-                    )
-
-        # Run AI qualification
 
         if st.button(
             "Qualify selected lead with AI",
             type="primary"
         ):
 
-            with st.spinner(
-                "Groq is assessing the lead..."
-            ):
+            with st.spinner("Groq is assessing the lead..."):
 
                 try:
-
-                    result = qualify(lead)
+                    result = qualify_lead(lead)
 
                     save_qualification_result(
                         lead["id"],
@@ -775,79 +776,67 @@ elif page == "AI Qualification":
                         "Review the recommendation before acting."
                     )
 
-                except Exception as e:
-
+                except Exception as exc:
                     st.error(
-                        f"Qualification failed; "
-                        f"no result was saved: {e}"
+                        f"Qualification failed: {exc}"
                     )
 
-        # Latest AI assessment
-
-        last = st.session_state.last_qualification
+        latest = st.session_state.last_qualification
 
         if (
-            last
-            and last.get("lead_reference")
+            latest
+            and latest.get("lead_reference")
             == lead.get("lead_reference")
         ):
 
             st.markdown("### Latest AI Assessment")
 
-            col1, col2, col3 = st.columns(3)
+            x, y, z = st.columns(3)
 
-            col1.metric(
-                "Fit Score",
-                f"{last['score']}/100"
+            x.metric(
+                "Fit score",
+                f"{latest['score']}/100"
             )
 
-            col2.metric(
+            y.metric(
                 "Category",
-                last["category"].replace("_", " ").title()
+                latest["category"].replace("_", " ").title()
             )
 
-            col3.metric(
+            z.metric(
                 "Priority",
-                last["priority"].title()
+                latest["priority"].title()
             )
 
             st.write("**Reasoning**")
+            st.write(latest["reasoning"])
 
-            st.write(last["reasoning"])
+            st.write("**Missing information**")
 
-            st.write("**Missing Information**")
+            if latest["missing_information"]:
 
-            if last["missing_information"]:
-
-                for item in last["missing_information"]:
+                for item in latest["missing_information"]:
                     st.write(f"- {item}")
 
             else:
+                st.write("No key missing information identified.")
 
-                st.write(
-                    "No key missing information identified."
+            st.write("**Recommended next action**")
+
+            st.info(
+                latest["recommended_next_action"]
+            )
+
+            st.warning(
+                "Human review required: "
+                + (
+                    "Yes"
+                    if latest["human_review_required"]
+                    else "Verify before action."
                 )
+            )
 
-            st.write("**Recommended Next Action**")
-
-            st.info(last["recommended_next_action"])
-
-            if last["human_review_required"]:
-
-                st.warning("Human review required: Yes")
-
-            else:
-
-                st.warning(
-                    "AI marked review optional. "
-                    "Verify the recommendation before taking action."
-                )
-
-        # Saved qualification history
-
-        history = get_qualification_results(
-            lead["id"]
-        )
+        history = get_qualification_results(lead["id"])
 
         if history:
 
@@ -861,7 +850,563 @@ elif page == "AI Qualification":
 
 
 # ============================================================
-# PAGE 5: WORKFLOW HISTORY
+# STEP 6 — INTELLIGENT OWNER ASSIGNMENT
+# ============================================================
+
+elif page == "Assignment & Follow-up":
+
+    st.subheader(
+        "Phase 6 — Intelligent Sales Owner Assignment"
+    )
+
+    st.write(
+        "LeadFlow AI selects sales representatives using "
+        "specialization, availability, and active workload."
+    )
+
+    leads = get_leads()
+    owners = get_sales_owners()
+    workloads = get_owner_workloads()
+
+    unassigned = [
+        lead
+        for lead in leads
+        if lead.get("assigned_owner_id") is None
+    ]
+
+    assigned = [
+        lead
+        for lead in leads
+        if lead.get("assigned_owner_id") is not None
+    ]
+
+    # --------------------------------------------------------
+    # SUMMARY METRICS
+    # --------------------------------------------------------
+
+    a, b, c = st.columns(3)
+
+    a.metric(
+        "Total sales owners",
+        len(owners)
+    )
+
+    b.metric(
+        "Unassigned leads",
+        len(unassigned)
+    )
+
+    c.metric(
+        "Assigned leads",
+        len(assigned)
+    )
+
+    if st.session_state.assignment_message:
+
+        st.success(
+            st.session_state.assignment_message
+        )
+
+        st.session_state.assignment_message = None
+
+    # --------------------------------------------------------
+    # 1. SALES OWNER ROSTER
+    # --------------------------------------------------------
+
+    st.markdown("### 1. Sales Owner Roster")
+
+    with st.expander(
+        "Add a sales owner",
+        expanded=not bool(owners)
+    ):
+
+        with st.form(
+            "add_sales_owner_form",
+            clear_on_submit=True
+        ):
+
+            owner_name = st.text_input(
+                "Full name *"
+            )
+
+            owner_email = st.text_input(
+                "Email *"
+            )
+
+            specialization = st.text_input(
+                "Specialization *",
+                placeholder=(
+                    "e.g. Biotechnology, Healthcare, "
+                    "SMB, Enterprise, General"
+                )
+            )
+
+            capacity = st.number_input(
+                "Maximum active leads",
+                min_value=1,
+                max_value=500,
+                value=20,
+                step=1
+            )
+
+            available = st.checkbox(
+                "Available for new leads",
+                value=True
+            )
+
+            add_owner = st.form_submit_button(
+                "Add sales owner",
+                type="primary"
+            )
+
+        if add_owner:
+
+            try:
+                owner_id = create_sales_owner(
+                    owner_name,
+                    owner_email,
+                    specialization,
+                    int(capacity),
+                    available
+                )
+
+                st.success(
+                    "Sales owner added successfully. "
+                    f"Owner ID: {owner_id}"
+                )
+
+                st.rerun()
+
+            except Exception as exc:
+                st.error(
+                    f"Could not add sales owner: {exc}"
+                )
+
+    # --------------------------------------------------------
+    # OWNER WORKLOAD TABLE
+    # --------------------------------------------------------
+
+    if workloads:
+
+        st.markdown("#### Current Owner Workload")
+
+        workload_view = [
+            {
+                "Owner": row["full_name"],
+                "Specialization": row["specialization"],
+                "Available": (
+                    "Yes" if row["is_available"] else "No"
+                ),
+                "Active leads": row["active_leads"],
+                "Capacity": row["active_lead_limit"],
+                "Remaining capacity": row["remaining_capacity"],
+            }
+            for row in workloads
+        ]
+
+        st.dataframe(
+            workload_view,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # ----------------------------------------------------
+        # CHANGE AVAILABILITY
+        # ----------------------------------------------------
+
+        availability_options = {
+            (
+                f"{row['full_name']} — "
+                f"{'Available' if row['is_available'] else 'Unavailable'}"
+            ): row
+            for row in owners
+        }
+
+        if availability_options:
+
+            with st.expander(
+                "Change owner availability"
+            ):
+
+                availability_label = st.selectbox(
+                    "Select sales owner",
+                    list(availability_options.keys()),
+                    key="availability_owner_select"
+                )
+
+                availability_owner = availability_options[
+                    availability_label
+                ]
+
+                new_availability = st.toggle(
+                    "Available for new leads",
+                    value=bool(
+                        availability_owner["is_available"]
+                    ),
+                    key=(
+                        f"availability_toggle_"
+                        f"{availability_owner['id']}"
+                    )
+                )
+
+                if st.button(
+                    "Save availability",
+                    key="save_availability"
+                ):
+
+                    try:
+                        update_sales_owner_availability(
+                            availability_owner["id"],
+                            new_availability
+                        )
+
+                        st.success(
+                            "Owner availability updated."
+                        )
+
+                        st.rerun()
+
+                    except Exception as exc:
+                        st.error(
+                            f"Could not update availability: {exc}"
+                        )
+
+    else:
+
+        st.info(
+            "No sales owners have been added yet. "
+            "Add at least one owner to enable assignment."
+        )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # 2. AUTOMATIC ASSIGNMENT
+    # --------------------------------------------------------
+
+    st.markdown("### 2. Automatically Assign Leads")
+
+    if not unassigned:
+
+        st.success(
+            "There are currently no unassigned leads."
+        )
+
+    elif not owners:
+
+        st.warning(
+            "Add sales owners to enable automatic assignment."
+        )
+
+    else:
+
+        st.write(
+            f"There are **{len(unassigned)}** unassigned "
+            "leads waiting for routing."
+        )
+
+        if st.button(
+            "Automatically Assign All Eligible Leads",
+            type="primary",
+            key="auto_assign_all"
+        ):
+
+            outcomes = []
+
+            progress = st.progress(0)
+
+            for index, item in enumerate(unassigned):
+
+                try:
+                    result = assign_lead_automatically(
+                        item["id"]
+                    )
+
+                    if result["assigned"]:
+
+                        outcomes.append(
+                            f"{item['lead_reference']}: "
+                            f"{result['message']}"
+                        )
+
+                    else:
+
+                        outcomes.append(
+                            f"{item['lead_reference']}: "
+                            "No eligible owner; left unassigned."
+                        )
+
+                except Exception as exc:
+
+                    outcomes.append(
+                        f"{item['lead_reference']}: "
+                        f"Assignment error — {exc}"
+                    )
+
+                progress.progress(
+                    (index + 1) / len(unassigned)
+                )
+
+            st.session_state.assignment_message = (
+                "Assignment run finished. "
+                + " | ".join(outcomes)
+            )
+
+            st.rerun()
+
+        # ----------------------------------------------------
+        # ASSIGN ONE LEAD AUTOMATICALLY
+        # ----------------------------------------------------
+
+        st.markdown("#### Assign One Lead")
+
+        lead_options = {
+            (
+                f"{item['lead_reference']} — "
+                f"{item['contact_name']} / "
+                f"{item['company']} "
+                f"({item.get('priority') or 'unassessed'} priority)"
+            ): item
+            for item in unassigned
+        }
+
+        selected_lead_label = st.selectbox(
+            "Select unassigned lead",
+            list(lead_options.keys()),
+            key="single_auto_lead"
+        )
+
+        selected_lead = lead_options[
+            selected_lead_label
+        ]
+
+        if st.button(
+            "Assign Selected Lead Automatically",
+            key="auto_assign_one"
+        ):
+
+            try:
+                result = assign_lead_automatically(
+                    selected_lead["id"]
+                )
+
+                if result["assigned"]:
+
+                    st.success(result["message"])
+
+                    if result.get("reason"):
+                        st.caption(
+                            "Assignment reason: "
+                            + result["reason"]
+                        )
+
+                else:
+
+                    st.warning(result["message"])
+
+                st.rerun()
+
+            except Exception as exc:
+                st.error(
+                    f"Automatic assignment failed: {exc}"
+                )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # 3. MANUAL ASSIGNMENT
+    # --------------------------------------------------------
+
+    st.markdown("### 3. Manual Assignment")
+
+    if unassigned and owners:
+
+        manual_lead_options = {
+            (
+                f"{item['lead_reference']} — "
+                f"{item['contact_name']} / "
+                f"{item['company']}"
+            ): item
+            for item in unassigned
+        }
+
+        manual_lead_label = st.selectbox(
+            "Choose an unassigned lead",
+            list(manual_lead_options.keys()),
+            key="manual_lead_select"
+        )
+
+        manual_lead = manual_lead_options[
+            manual_lead_label
+        ]
+
+        eligible_owner_rows = [
+            row
+            for row in workloads
+            if (
+                row["is_available"]
+                and row["remaining_capacity"] > 0
+            )
+        ]
+
+        if eligible_owner_rows:
+
+            manual_owner_options = {
+                (
+                    f"{row['full_name']} — "
+                    f"{row['specialization']} "
+                    f"({row['remaining_capacity']} slots left)"
+                ): row
+                for row in eligible_owner_rows
+            }
+
+            manual_owner_label = st.selectbox(
+                "Choose a sales owner",
+                list(manual_owner_options.keys()),
+                key="manual_owner_select"
+            )
+
+            if st.button(
+                "Confirm Manual Assignment",
+                key="manual_assign_button"
+            ):
+
+                try:
+                    selected_owner = manual_owner_options[
+                        manual_owner_label
+                    ]
+
+                    assign_lead_owner(
+                        manual_lead["id"],
+                        selected_owner["id"]
+                    )
+
+                    st.success(
+                        "Lead assigned to "
+                        f"{selected_owner['full_name']}."
+                    )
+
+                    st.rerun()
+
+                except Exception as exc:
+                    st.error(
+                        f"Manual assignment failed: {exc}"
+                    )
+
+        else:
+
+            st.info(
+                "No available owner has remaining capacity. "
+                "Increase capacity or mark an owner available."
+            )
+
+    elif not unassigned:
+
+        st.info(
+            "No unassigned leads are available for manual assignment."
+        )
+
+    else:
+
+        st.info(
+            "Add a sales owner before assigning leads."
+        )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # 4. ASSIGNED LEADS
+    # --------------------------------------------------------
+
+    st.markdown("### 4. Assigned Leads")
+
+    if assigned:
+
+        assigned_view = [
+            {
+                "Lead reference": item["lead_reference"],
+                "Contact": item["contact_name"],
+                "Company": item["company"],
+                "Priority": item["priority"],
+                "Status": item["status"],
+                "Assigned owner": (
+                    item.get("assigned_owner_name")
+                    or "Unknown"
+                ),
+            }
+            for item in assigned
+        ]
+
+        st.dataframe(
+            assigned_view,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # ----------------------------------------------------
+        # UNASSIGN A LEAD
+        # ----------------------------------------------------
+
+        with st.expander(
+            "Return an assigned lead to the unassigned queue"
+        ):
+
+            assigned_options = {
+                (
+                    f"{item['lead_reference']} — "
+                    f"{item['contact_name']} "
+                    f"(Owner: "
+                    f"{item.get('assigned_owner_name') or 'Unknown'})"
+                ): item
+                for item in assigned
+            }
+
+            selected_assigned_label = st.selectbox(
+                "Select assigned lead",
+                list(assigned_options.keys()),
+                key="unassign_lead_select"
+            )
+
+            selected_assigned = assigned_options[
+                selected_assigned_label
+            ]
+
+            if st.button(
+                "Unassign Selected Lead",
+                key="unassign_button"
+            ):
+
+                try:
+                    unassign_lead_owner(
+                        selected_assigned["id"]
+                    )
+
+                    st.success(
+                        "Lead returned to the unassigned queue."
+                    )
+
+                    st.rerun()
+
+                except Exception as exc:
+                    st.error(
+                        f"Could not unassign lead: {exc}"
+                    )
+
+    else:
+
+        st.info(
+            "No leads have been assigned yet."
+        )
+
+    st.caption(
+        "Assignment is rule-based. AI qualification priority is "
+        "displayed for context but does not override owner availability "
+        "or capacity. No email is sent in this phase."
+    )
+
+
+# ============================================================
+# WORKFLOW HISTORY
 # ============================================================
 
 elif page == "Workflow History":
@@ -880,36 +1425,51 @@ elif page == "Workflow History":
 
     else:
 
-        st.info("No workflow events recorded yet.")
+        st.info(
+            "No workflow events recorded yet."
+        )
 
 
 # ============================================================
-# PAGE 6: DATABASE SETUP
+# DATABASE SETUP
 # ============================================================
 
 elif page == "Database Setup":
 
     st.subheader("Database Setup")
 
-    st.success("Connected to Neon PostgreSQL.")
+    st.success(
+        "Connected to Neon PostgreSQL."
+    )
 
     counts = get_table_counts()
 
-    table_data = [
-        {
-            "Table": table_name,
-            "Records": record_count
-        }
-        for table_name, record_count in counts.items()
-    ]
-
     st.dataframe(
-        table_data,
+        [
+            {
+                "Table": table,
+                "Records": total
+            }
+            for table, total in counts.items()
+        ],
         use_container_width=True,
         hide_index=True
     )
 
     st.caption(
-        "Expected tables: leads, sales_owners, "
-        "qualification_results, email_drafts, workflow_events."
+        "Existing tables: leads, sales_owners, "
+        "qualification_results, email_drafts, workflow_events. "
+        "This application does not recreate them."
     )
+
+
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.divider()
+
+st.caption(
+    "LeadFlow AI · Step 6 — Intelligent Sales Owner Assignment · "
+    "AI recommendations require human review."
+)
