@@ -72,9 +72,9 @@ st.markdown(
     }
 
     /* Hide Streamlit's automatic multipage navigation.
-       The custom sidebar navigation below replaces it. */
+       Custom sidebar navigation is used instead. */
     [data-testid="stSidebarNav"] {
-        display: none;
+        display: none !important;
     }
 
     h1, h2, h3 {
@@ -137,13 +137,52 @@ st.markdown(
         margin-bottom: 18px;
     }
 
+    /* Consistent custom sidebar section styling */
     .sidebar-section {
-        color: #a78bfa;
+        color: #ffffff !important;
         font-size: 0.75rem;
         font-weight: 800;
         letter-spacing: 1.2px;
         margin-top: 14px;
         margin-bottom: 7px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    /* Style the three navigation buttons like sidebar sections */
+    [data-testid="stSidebar"] .stButton > button {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        color: #ffffff !important;
+        width: 100%;
+        min-height: 38px;
+        padding: 7px 0;
+        text-align: left;
+        justify-content: flex-start;
+        font-size: 0.75rem;
+        font-weight: 800;
+        letter-spacing: 1.2px;
+        border-radius: 6px;
+    }
+
+    [data-testid="stSidebar"] .stButton > button p {
+        color: #ffffff !important;
+        font-size: 0.75rem;
+        font-weight: 800;
+        letter-spacing: 1.2px;
+    }
+
+    [data-testid="stSidebar"] .stButton > button:hover {
+        background: rgba(167, 139, 250, 0.12) !important;
+        border: none !important;
+        color: #ffffff !important;
+    }
+
+    [data-testid="stSidebar"] .stButton > button:focus {
+        box-shadow: none !important;
+        border: none !important;
     }
 
     </style>
@@ -481,29 +520,32 @@ with st.sidebar:
     st.divider()
 
     # SECTION 2 — AGENT WORKFLOW
-    st.page_link(
-        "pages/8_Agent_Workflow.py",
-        label="AGENT WORKFLOW",
-        icon="🤖",
-    )
+    if st.button(
+        "🤖  AGENT WORKFLOW",
+        key="nav_agent_workflow",
+        use_container_width=True,
+    ):
+        st.switch_page("pages/8_Agent_Workflow.py")
 
     st.divider()
 
     # SECTION 3 — DASHBOARD & AUDIT
-    st.page_link(
-        "pages/9_Dashboard_Audit.py",
-        label="DASHBOARD & AUDIT",
-        icon="📊",
-    )
+    if st.button(
+        "📊  DASHBOARD & AUDIT",
+        key="nav_dashboard_audit",
+        use_container_width=True,
+    ):
+        st.switch_page("pages/9_Dashboard_Audit.py")
 
     st.divider()
 
     # SECTION 4 — HUMAN REVIEW CENTER
-    st.page_link(
-        "pages/10_Human_Review_Center.py",
-        label="HUMAN REVIEW CENTER",
-        icon="🛡️",
-    )
+    if st.button(
+        "🛡️  HUMAN REVIEW CENTER",
+        key="nav_human_review_center",
+        use_container_width=True,
+    ):
+        st.switch_page("pages/10_Human_Review_Center.py")
 
     st.divider()
 
