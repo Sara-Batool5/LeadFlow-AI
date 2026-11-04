@@ -628,6 +628,7 @@ def _specialization_match(specialization, lead):
     return any(term in searchable for term in terms)
 
 
+
 def assign_lead_automatically(lead_id):
     lead = get_lead_by_id(lead_id)
 
@@ -636,45 +637,86 @@ def assign_lead_automatically(lead_id):
 
     with _connect() as conn:
         with conn.cursor() as cur:
+
+            # Lock available sales-owner rows without GROUP BY.
             cur.execute(
                 """
                 SELECT
-                    s.id,
-                    s.full_name,
-                    s.specialization,
-                    s.is_available,
-                    s.active_lead_limit,
-                    COUNT(
-                        CASE
-                            WHEN LOWER(COALESCE(l.status, '')) NOT IN
-                            ('closed', 'won', 'lost', 'disqualified')
-                            THEN 1
-                        END
-                    ) AS active_leads
-                FROM sales_owners s
-                LEFT JOIN leads l ON l.assigned_owner_id = s.id
-                WHERE s.is_available = TRUE
-                GROUP BY s.id
-                FOR UPDATE OF s;
+                    id,
+                    full_name,
+                    specialization,
+                    is_available,
+                    active_lead_limit
+                FROM sales_owners
+                WHERE is_available = TRUE
+                ORDER BY id
+                FOR UPDATE;
                 """
             )
-            owners = [dict(row) for row in cur.fetchall()]
 
+            locked_owners = cur.fetchall()
+
+            if not locked_owners:
+                return False, "No available sales owners found.", None
+
+            # Calculate each owner's active workload separately.
+            cur.execute(
+                """
+                SELECT
+                    assigned_owner_id,
+                    COUNT(*) AS active_leads
+                FROM leads
+                WHERE assigned_owner_id IS NOT NULL
+                  AND LOWER(COALESCE(status, '')) NOT IN
+                      ('closed', 'won', 'lost', 'disqualified')
+                GROUP BY assigned_owner_id;
+                """
+            )
+
+            workload_rows = cur.fetchall()
+
+            workload = {
+                row["assigned_owner_id"]: int(row["active_leads"])
+                for row in workload_rows
+            }
+
+            owners = []
+
+            for owner in locked_owners:
+                owner_data = dict(owner)
+
+                owner_data["active_leads"] = workload.get(
+                    owner_data["id"], 0
+                )
+
+                owners.append(owner_data)
+
+            # Exclude owners who have reached their capacity.
             eligible = [
                 owner for owner in owners
-                if int(owner["active_leads"]) < int(owner["active_lead_limit"])
+                if int(owner["active_leads"])
+                < int(owner["active_lead_limit"])
             ]
 
             if not eligible:
-                return False, "No available sales owner has remaining capacity.", None
+                return (
+                    False,
+                    "No available sales owner has remaining capacity.",
+                    None,
+                )
 
+            # Prefer owners whose specialization matches the lead.
             matching = [
                 owner for owner in eligible
-                if _specialization_match(owner.get("specialization"), lead)
+                if _specialization_match(
+                    owner.get("specialization"),
+                    lead,
+                )
             ]
 
             candidates = matching if matching else eligible
 
+            # Select the owner with the lowest capacity utilization.
             candidates.sort(
                 key=lambda owner: (
                     int(owner["active_leads"]) / max(
@@ -686,20 +728,28 @@ def assign_lead_automatically(lead_id):
 
             selected = candidates[0]
 
+            # Assign the lead.
             cur.execute(
                 """
                 UPDATE leads
-                SET assigned_owner_id = %s, updated_at = NOW()
+                SET assigned_owner_id = %s,
+                    updated_at = NOW()
                 WHERE id = %s;
                 """,
                 (selected["id"], lead_id),
             )
 
+            # Record the assignment in workflow history.
             cur.execute(
                 """
                 INSERT INTO workflow_events (
-                    lead_id, event_type, event_status,
-                    message, details, actor, created_at
+                    lead_id,
+                    event_type,
+                    event_status,
+                    message,
+                    details,
+                    actor,
+                    created_at
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, NOW());
                 """,
@@ -712,12 +762,15 @@ def assign_lead_automatically(lead_id):
                         "owner_id": selected["id"],
                         "owner_name": selected["full_name"],
                         "specialization": selected["specialization"],
+                        "active_leads": selected["active_leads"],
+                        "active_lead_limit": selected["active_lead_limit"],
                     }),
                     "LeadFlow AI",
                 ),
             )
 
     return True, f"Assigned to {selected['full_name']}.", selected
+
 
 
 def assign_lead_owner(lead_id, owner_id):
