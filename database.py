@@ -819,7 +819,11 @@ def save_email_draft(
 ):
     """
     Create a new draft, or update an existing draft.
-    Saving content resets the status to draft.
+
+    New and edited drafts use the database-approved status:
+    pending_review.
+
+    Saving an edited draft resets its approval information.
     """
 
     recipient_email = _clean(recipient_email)
@@ -845,7 +849,7 @@ def save_email_draft(
                         recipient_email = %s,
                         subject = %s,
                         body = %s,
-                        draft_status = 'draft',
+                        draft_status = 'pending_review',
                         approved_by = NULL,
                         approved_at = NULL,
                         updated_at = NOW()
@@ -857,7 +861,9 @@ def save_email_draft(
                 result = cur.fetchone()
 
                 if not result:
-                    raise ValueError("The selected email draft could not be found.")
+                    raise ValueError(
+                        "The selected email draft could not be found."
+                    )
 
                 saved_id = result["id"]
                 event_type = "email_draft_updated"
@@ -875,7 +881,9 @@ def save_email_draft(
                         created_at,
                         updated_at
                     )
-                    VALUES (%s, %s, %s, %s, 'draft', NOW(), NOW())
+                    VALUES (
+                        %s, %s, %s, %s, 'pending_review', NOW(), NOW()
+                    )
                     RETURNING id;
                     """,
                     (lead_id, recipient_email, subject, body),
@@ -906,6 +914,7 @@ def save_email_draft(
                         "email_draft_id": saved_id,
                         "recipient_email": recipient_email,
                         "subject": subject,
+                        "draft_status": "pending_review",
                     }),
                     "LeadFlow AI",
                 ),
