@@ -440,7 +440,7 @@ with st.sidebar:
     else:
         st.error("Database connection failed")
 
-    st.caption("LeadFlow AI • Step 7")
+    st.caption("LeadFlow AI")
 
 
 if not db_connected:
