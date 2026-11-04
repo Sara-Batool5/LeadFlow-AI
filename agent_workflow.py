@@ -2,7 +2,7 @@
 import json
 import os
 import re
-from typing import TypedDict, Any
+from typing import TypedDict
 
 import streamlit as st
 from groq import Groq
@@ -53,6 +53,14 @@ class LeadWorkflowState(TypedDict, total=False):
 # CONFIGURATION
 # ============================================================
 
+ALLOWED_QUALIFICATION_CATEGORIES = {
+    "high_fit",
+    "medium_fit",
+    "low_fit",
+    "needs_review",
+}
+
+
 def get_secret(name, default=None):
     try:
         value = st.secrets.get(name)
@@ -84,14 +92,63 @@ def get_groq_model():
 
 def clean_json_response(content):
     content = (content or "").strip()
+
     content = re.sub(
         r"^```(?:json)?\s*",
         "",
         content,
         flags=re.IGNORECASE,
     )
+
     content = re.sub(r"\s*```$", "", content)
+
     return content.strip()
+
+
+def normalize_qualification_category(category):
+    """
+    Convert AI-generated category variations into the exact
+    category values accepted by the Neon database.
+    """
+
+    original = str(category or "").strip().lower()
+
+    normalized = re.sub(r"[\s\-]+", "_", original)
+    normalized = re.sub(r"[^a-z_]", "", normalized)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+
+    category_aliases = {
+        "high": "high_fit",
+        "highfit": "high_fit",
+        "high_potential": "high_fit",
+        "high_fit": "high_fit",
+
+        "medium": "medium_fit",
+        "mediumfit": "medium_fit",
+        "medium_potential": "medium_fit",
+        "medium_fit": "medium_fit",
+
+        "low": "low_fit",
+        "lowfit": "low_fit",
+        "low_potential": "low_fit",
+        "low_fit": "low_fit",
+
+        "needsreview": "needs_review",
+        "need_review": "needs_review",
+        "needs_review": "needs_review",
+        "review": "needs_review",
+        "manual_review": "needs_review",
+    }
+
+    normalized_category = category_aliases.get(
+        normalized,
+        "needs_review",
+    )
+
+    if normalized_category not in ALLOWED_QUALIFICATION_CATEGORIES:
+        normalized_category = "needs_review"
+
+    return normalized_category
 
 
 # ============================================================
@@ -133,6 +190,7 @@ def intake_validation_agent(state: LeadWorkflowState):
         }
 
     lead["contact_name"] = contact_name
+
     lead["description"] = (
         lead.get("description")
         or lead.get("need_description")
@@ -218,7 +276,9 @@ def qualification_agent(state: LeadWorkflowState):
         lead = get_lead_by_id(state["lead_id"])
 
         if not lead:
-            raise ValueError("The newly created lead could not be retrieved.")
+            raise ValueError(
+                "The newly created lead could not be retrieved."
+            )
 
         client = get_groq_client()
 
@@ -242,22 +302,37 @@ Timeline: {lead.get('timeline')}
 Business need: {lead.get('description')}
 
 Return valid JSON only using this structure:
+
 {{
     "score": 0,
-    "category": "High | Medium | Low | Needs Review",
+    "category": "needs_review",
     "reasoning": "Short explanation",
     "missing_information": ["item 1"],
     "recommended_next_action": "Specific next action",
     "human_review_required": true
 }}
 
-SCORING
-80-100: High potential
-50-79: Medium potential
-0-49: Low potential
+IMPORTANT CATEGORY RULES
 
-Use Needs Review if essential information is insufficient.
+The category MUST be exactly ONE of these values:
+
+- high_fit
+- medium_fit
+- low_fit
+- needs_review
+
+Do not use spaces, capital letters, or any other category names.
+
+SCORING
+80-100: high_fit
+50-79: medium_fit
+0-49: low_fit
+
+Use needs_review if essential information is insufficient
+to make a reliable qualification decision.
+
 Do not inflate the score.
+If category is needs_review, human_review_required must be true.
 """
 
         response = client.chat.completions.create(
@@ -267,7 +342,8 @@ Do not inflate the score.
                     "role": "system",
                     "content": (
                         "You are a careful B2B lead qualification "
-                        "assistant. Return valid JSON only."
+                        "assistant. Return valid JSON only. "
+                        "Use only the permitted category values."
                     ),
                 },
                 {
@@ -292,19 +368,46 @@ Do not inflate the score.
 
         result["score"] = score
 
+        # Normalize the AI category before saving it to Neon.
+        original_category = result.get("category", "")
+
+        normalized_category = normalize_qualification_category(
+            original_category
+        )
+
+        result["category"] = normalized_category
+
+        # Preserve the original AI category for traceability
+        # if it needed normalization.
+        if str(original_category).strip().lower() != normalized_category:
+            result["original_ai_category"] = str(original_category)
+
         missing = result.get("missing_information", [])
 
         if not isinstance(missing, list):
-            result["missing_information"] = [str(missing)]
+            missing = [str(missing)]
 
-        result.setdefault("category", "Needs Review")
-        result.setdefault("reasoning", "No reasoning was returned.")
+        result["missing_information"] = missing
+
+        result.setdefault(
+            "reasoning",
+            "No reasoning was returned.",
+        )
+
         result.setdefault(
             "recommended_next_action",
             "Review the lead manually.",
         )
-        result.setdefault("human_review_required", True)
 
+        result["human_review_required"] = bool(
+            result.get("human_review_required", True)
+        )
+
+        # Needs Review always requires human review.
+        if normalized_category == "needs_review":
+            result["human_review_required"] = True
+
+        # Save qualification using the exact database category.
         save_qualification_result(
             state["lead_id"],
             result,
@@ -314,7 +417,7 @@ Do not inflate the score.
         update_lead_qualification(
             state["lead_id"],
             score,
-            result["category"],
+            normalized_category,
         )
 
         create_workflow_event(
@@ -397,7 +500,9 @@ def email_draft_agent(state: LeadWorkflowState):
     if not lead:
         return {
             "stage": "email_draft_failed",
-            "email_warning": "Lead could not be retrieved for email generation.",
+            "email_warning": (
+                "Lead could not be retrieved for email generation."
+            ),
             "route": "complete",
         }
 
