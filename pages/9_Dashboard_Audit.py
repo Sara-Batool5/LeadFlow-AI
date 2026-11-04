@@ -1316,7 +1316,7 @@ else:
 st.divider()
 
 st.caption(
-    "LeadFlow AI · Step 9 · Dashboard & Audit Center · "
+    "LeadFlow AI · Dashboard & Audit Center · "
     "Data retrieved from Neon PostgreSQL"
 )
 
