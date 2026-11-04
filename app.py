@@ -115,6 +115,31 @@ st.markdown(
         overflow: hidden;
     }
 
+    /* Sidebar branding */
+    .sidebar-brand {
+        font-size: 1.45rem;
+        font-weight: 800;
+        color: #ffffff;
+        margin-bottom: 2px;
+        line-height: 1.4;
+    }
+
+    .sidebar-subtitle {
+        color: #aab6ca;
+        font-size: 0.85rem;
+        margin-top: 0;
+        margin-bottom: 18px;
+    }
+
+    .sidebar-section {
+        color: #a78bfa;
+        font-size: 0.75rem;
+        font-weight: 800;
+        letter-spacing: 1.2px;
+        margin-top: 14px;
+        margin-bottom: 7px;
+    }
+
     </style>
     """,
     unsafe_allow_html=True,
@@ -307,7 +332,7 @@ Scoring guidance:
 
 
 # ============================================================
-# AI FOLLOW-UP EMAIL GENERATION — STEP 7
+# AI FOLLOW-UP EMAIL GENERATION
 # ============================================================
 
 def generate_followup_email(lead, email_purpose, tone, extra_instructions):
@@ -415,10 +440,23 @@ BODY:
 # ============================================================
 
 with st.sidebar:
-    st.markdown("# 🎯 LeadFlow AI")
-    st.caption("Intelligent Lead Management")
+
+    # BRANDING — ALWAYS AT THE TOP
+    st.markdown(
+        """
+        <div class="sidebar-brand">🎯 LeadFlow AI</div>
+        <div class="sidebar-subtitle">Intelligent Lead Management</div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.divider()
+
+    # SECTION 1 — APP
+    st.markdown(
+        '<div class="sidebar-section">APP</div>',
+        unsafe_allow_html=True,
+    )
 
     page = st.radio(
         "Workspace",
@@ -431,6 +469,34 @@ with st.sidebar:
             "Workflow History",
             "Database Setup",
         ],
+        label_visibility="collapsed",
+    )
+
+    st.divider()
+
+    # SECTION 2 — AGENT WORKFLOW
+    st.page_link(
+        "pages/8_Agent_Workflow.py",
+        label="AGENT WORKFLOW",
+        icon="🤖",
+    )
+
+    st.divider()
+
+    # SECTION 3 — DASHBOARD & AUDIT
+    st.page_link(
+        "pages/9_Dashboard_Audit.py",
+        label="DASHBOARD & AUDIT",
+        icon="📊",
+    )
+
+    st.divider()
+
+    # SECTION 4 — HUMAN REVIEW CENTER
+    st.page_link(
+        "pages/10_Human_Review_Center.py",
+        label="HUMAN REVIEW CENTER",
+        icon="🛡️",
     )
 
     st.divider()
@@ -439,8 +505,6 @@ with st.sidebar:
         st.success("Database connected")
     else:
         st.error("Database connection failed")
-
-    st.caption("LeadFlow AI")
 
 
 if not db_connected:
@@ -860,7 +924,7 @@ elif page == "AI Qualification":
 
 
 # ============================================================
-# ASSIGNMENT & FOLLOW-UP — STEP 6 + STEP 7
+# ASSIGNMENT & FOLLOW-UP
 # ============================================================
 
 elif page == "Assignment & Follow-up":
@@ -1106,7 +1170,7 @@ elif page == "Assignment & Follow-up":
         st.info("No leads have been assigned yet.")
 
     # ========================================================
-    # STEP 7 — AI EMAIL DRAFTING
+    # AI EMAIL DRAFTING
     # ========================================================
 
     st.divider()
