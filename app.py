@@ -1379,7 +1379,7 @@ elif page == "Assignment & Follow-up":
         st.info("No email drafts have been saved yet.")
 
     st.caption(
-        "Email sending is intentionally not enabled in Step 7. "
+        "Email sending is intentionally not enabled. "
         "Generated emails remain drafts until reviewed and approved."
     )
 
