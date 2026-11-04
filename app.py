@@ -71,6 +71,12 @@ st.markdown(
         color: #e2e8f0;
     }
 
+    /* Hide Streamlit's automatic multipage navigation.
+       The custom sidebar navigation below replaces it. */
+    [data-testid="stSidebarNav"] {
+        display: none;
+    }
+
     h1, h2, h3 {
         color: #f8fafc;
     }
