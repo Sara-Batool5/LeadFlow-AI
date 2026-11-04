@@ -1,14 +1,10 @@
-import json
+
 import os
 import uuid
-from datetime import datetime, timezone
+from urllib.parse import urlparse
 
-import psycopg
-from psycopg.rows import dict_row
-
-
-class DatabaseConfigurationError(RuntimeError):
-    pass
+import psycopg2
+from psycopg2.extras import RealDictCursor, Json
 
 
 # ============================================================
@@ -16,62 +12,77 @@ class DatabaseConfigurationError(RuntimeError):
 # ============================================================
 
 def get_database_url():
+    """
+    Get the Neon PostgreSQL connection string from Streamlit
+    secrets or environment variables.
+    """
     try:
         import streamlit as st
-        value = st.secrets.get("NEON_DATABASE_URL")
-    except Exception:
-        value = None
 
-    return value or os.getenv("NEON_DATABASE_URL")
+        database_url = st.secrets.get("NEON_DATABASE_URL", None)
+        if database_url:
+            return database_url
+    except Exception:
+        pass
+
+    database_url = os.getenv("NEON_DATABASE_URL")
+
+    if not database_url:
+        raise ValueError(
+            "NEON_DATABASE_URL is missing. Add it to Streamlit "
+            "Cloud Secrets or your environment variables."
+        )
+
+    return database_url
 
 
 def _connect():
-    url = get_database_url()
-
-    if not url:
-        raise DatabaseConfigurationError(
-            "NEON_DATABASE_URL is not configured."
-        )
-
-    return psycopg.connect(
-        url,
-        row_factory=dict_row,
+    """Create a PostgreSQL connection."""
+    return psycopg2.connect(
+        get_database_url(),
+        sslmode="require",
+        cursor_factory=RealDictCursor,
         connect_timeout=15
     )
 
 
 def test_connection():
+    """Test the Neon database connection."""
     try:
         with _connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                cur.fetchone()
+                cur.execute("SELECT version() AS version")
+                result = cur.fetchone()
 
-        return True
+        return {
+            "success": True,
+            "message": "Successfully connected to Neon PostgreSQL.",
+            "version": result["version"]
+        }
 
-    except Exception:
-        return False
+    except Exception as e:
+        return {
+            "success": False,
+            "message": str(e)
+        }
 
 
 # ============================================================
-# SCHEMA INITIALIZATION
-# IMPORTANT:
-# Existing Neon tables are preserved.
-# IDs and foreign-key relationships are not changed.
+# DATABASE INITIALIZATION
 # ============================================================
 
 def initialize_schema():
     """
-    The Neon database already contains the required tables.
+    Preserve the existing database tables.
 
-    This function intentionally does not recreate tables,
-    change ID types, or run destructive migrations.
-    It only ensures compatible indexes exist.
+    This function only creates useful indexes if they do not
+    already exist. It does NOT recreate tables, change ID types,
+    or delete existing records.
     """
 
-    sqls = [
+    index_queries = [
         """
-        CREATE INDEX IF NOT EXISTS idx_leads_email_lower
+        CREATE INDEX IF NOT EXISTS idx_leads_email
         ON leads (LOWER(email))
         """,
         """
@@ -79,27 +90,29 @@ def initialize_schema():
         ON leads (created_at DESC)
         """,
         """
-        CREATE INDEX IF NOT EXISTS idx_workflow_events_created_at
-        ON workflow_events (created_at DESC)
+        CREATE INDEX IF NOT EXISTS idx_leads_status
+        ON leads (status)
         """,
         """
-        CREATE INDEX IF NOT EXISTS idx_qualification_lead_created
-        ON qualification_results (lead_id, created_at DESC)
+        CREATE INDEX IF NOT EXISTS idx_workflow_events_lead_id
+        ON workflow_events (lead_id)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_qualification_results_lead_id
+        ON qualification_results (lead_id)
         """
     ]
 
     with _connect() as conn:
         with conn.cursor() as cur:
-            for sql in sqls:
-                cur.execute(sql)
+            for query in index_queries:
+                cur.execute(query)
 
+    return True
 
-# ============================================================
-# TABLE COUNTS
-# ============================================================
 
 def get_table_counts():
-    result = {}
+    """Return record counts for the main LeadFlow tables."""
 
     tables = [
         "leads",
@@ -109,84 +122,69 @@ def get_table_counts():
         "workflow_events"
     ]
 
+    counts = {}
+
     with _connect() as conn:
         with conn.cursor() as cur:
             for table in tables:
-                cur.execute(
-                    f"SELECT COUNT(*) AS count FROM {table}"
-                )
+                # Table names are selected only from the fixed list above.
+                cur.execute(f"SELECT COUNT(*) AS total FROM {table}")
+                counts[table] = cur.fetchone()["total"]
 
-                result[table] = int(cur.fetchone()["count"])
-
-    return result
+    return counts
 
 
 # ============================================================
-# DUPLICATE DETECTION HELPERS
+# NORMALIZATION HELPERS
 # ============================================================
 
-def _website(value):
-    value = (value or "").strip().lower()
-
-    value = value.replace("https://", "")
-    value = value.replace("http://", "")
-
-    value = value.split("/")[0]
-
-    return value.removeprefix("www.")
+def _normalize(value):
+    """Normalize text for reliable comparisons."""
+    return str(value or "").strip().lower()
 
 
-def _domain(value):
-    if value and "@" in value:
-        return value.strip().lower().split("@")[-1]
+def _normalize_website(value):
+    """Normalize a website URL for duplicate comparisons."""
+    website = _normalize(value)
 
-    return ""
+    if not website:
+        return ""
 
+    website = website.replace("https://", "")
+    website = website.replace("http://", "")
+    website = website.replace("www.", "")
 
-def _free(domain):
-    free_domains = {
-        "gmail.com",
-        "yahoo.com",
-        "hotmail.com",
-        "outlook.com",
-        "live.com",
-        "icloud.com",
-        "aol.com",
-        "proton.me",
-        "protonmail.com",
-        "mail.com",
-        "yandex.com",
-        "gmx.com"
-    }
-
-    return domain in free_domains
+    return website.split("/")[0].strip().rstrip(".")
 
 
 # ============================================================
-# FIND POTENTIAL DUPLICATES
+# LEAD DUPLICATE DETECTION
 # ============================================================
 
 def find_potential_duplicates(lead):
+    """
+    Find likely duplicate leads without flagging unrelated
+    contacts merely because they work for the same company.
 
-    email = (lead.get("email") or "").strip().lower()
+    Matching rules:
+    1. Exact email address.
+    2. Exact contact name AND exact company.
+    3. Exact contact name AND exact website.
 
-    company = (lead.get("company") or "").strip().lower()
+    Same company alone, same email domain alone, or similar
+    name fragments are not considered sufficient matches.
+    """
 
-    name = (
-        lead.get("contact_name")
-        or lead.get("full_name")
-        or ""
-    ).strip().lower()
-
-    website = _website(lead.get("website"))
-
-    domain = _domain(email)
+    email = _normalize(lead.get("email"))
+    name = _normalize(
+        lead.get("contact_name") or lead.get("full_name")
+    )
+    company = _normalize(lead.get("company"))
+    website = _normalize_website(lead.get("website"))
 
     with _connect() as conn:
         with conn.cursor() as cur:
-
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT
                     id,
                     lead_reference,
@@ -199,311 +197,374 @@ def find_potential_duplicates(lead):
                 FROM leads
                 ORDER BY created_at DESC
                 LIMIT 500
-                """
-            )
+            """)
 
             rows = cur.fetchall()
 
-    found = []
+    matches = []
 
     for row in rows:
-
-        existing_email = (
-            row.get("email") or ""
-        ).strip().lower()
-
-        existing_company = (
-            row.get("company") or ""
-        ).strip().lower()
-
-        existing_name = (
-            row.get("contact_name") or ""
-        ).strip().lower()
-
-        existing_website = _website(
+        existing_email = _normalize(row.get("email"))
+        existing_name = _normalize(row.get("contact_name"))
+        existing_company = _normalize(row.get("company"))
+        existing_website = _normalize_website(
             row.get("website")
         )
 
-        existing_domain = _domain(existing_email)
+        match_type = None
 
-        match_types = []
-
-        # Exact email match
         if email and email == existing_email:
+            match_type = "exact_email"
 
-            match_types.append("exact_email")
+        elif (
+            name
+            and company
+            and name == existing_name
+            and company == existing_company
+        ):
+            match_type = "same_contact_and_company"
 
-        else:
+        elif (
+            name
+            and website
+            and name == existing_name
+            and website == existing_website
+        ):
+            match_type = "same_contact_and_website"
 
-            # Similar contact name
-            if (
-                name
-                and existing_name
-                and (
-                    name == existing_name
-                    or name in existing_name
-                    or existing_name in name
-                )
-            ):
-                match_types.append("similar_contact_name")
-
-            # Similar company
-            if (
-                company
-                and existing_company
-                and (
-                    company == existing_company
-                    or company in existing_company
-                    or existing_company in company
-                )
-            ):
-                match_types.append("same_or_similar_company")
-
-            # Similar website
-            if (
-                website
-                and existing_website
-                and (
-                    website == existing_website
-                    or website.endswith("." + existing_website)
-                    or existing_website.endswith("." + website)
-                )
-            ):
-                match_types.append("same_website_domain")
-
-            # Same business email domain
-            if (
-                domain
-                and domain == existing_domain
-                and not _free(domain)
-            ):
-                match_types.append("same_business_email_domain")
-
-        if match_types:
-
+        if match_type:
             item = dict(row)
-
-            item["match_type"] = ", ".join(match_types)
-
+            item["match_type"] = match_type
             item["created_at"] = str(
-                item.get("created_at", "")
+                item.get("created_at") or ""
             )
 
-            # Do not expose database ID in duplicate preview
+            # Do not expose the internal database ID in the UI.
             item.pop("id", None)
 
-            found.append(item)
+            matches.append(item)
 
-    return found[:10]
+    return matches[:10]
 
 
 # ============================================================
-# CREATE NEW LEAD
-# Uses actual Neon column names and BIGINT auto-generated IDs.
+# LEAD CREATION
 # ============================================================
 
 def create_lead(lead):
+    """
+    Insert a new lead into the existing leads table.
 
-    reference = (
-        "LF-"
-        + datetime.now(timezone.utc).strftime("%y%m%d")
-        + "-"
-        + uuid.uuid4().hex[:6].upper()
+    App-facing names are mapped to the actual Neon column names:
+    contact_name -> full_name
+    description  -> need_description
+    budget       -> budget_range
+    """
+
+    lead_reference = (
+        lead.get("lead_reference")
+        or f"LD-{uuid.uuid4().hex[:8].upper()}"
     )
 
     contact_name = (
         lead.get("contact_name")
         or lead.get("full_name")
         or ""
-    ).strip()
+    )
+
+    description = (
+        lead.get("description")
+        or lead.get("need_description")
+        or ""
+    )
+
+    budget = (
+        lead.get("budget")
+        or lead.get("budget_range")
+        or ""
+    )
 
     with _connect() as conn:
-
         with conn.cursor() as cur:
-
-            cur.execute(
-                """
+            cur.execute("""
                 INSERT INTO leads (
                     lead_reference,
                     full_name,
                     email,
                     company,
-                    website,
                     job_title,
+                    website,
+                    company_size,
                     industry,
                     country,
-                    company_size,
+                    source,
+                    need_description,
                     budget_range,
                     timeline,
-                    need_description
+                    status,
+                    priority,
+                    consent_to_contact
                 )
                 VALUES (
                     %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s
                 )
-                RETURNING id
-                """,
-                (
-                    reference,
-                    contact_name,
-                    (lead.get("email") or "").strip(),
-                    lead.get("company") or "",
-                    lead.get("website") or None,
-                    lead.get("job_title") or None,
-                    lead.get("industry") or None,
-                    lead.get("country") or None,
-                    lead.get("company_size") or None,
-                    lead.get("budget") or lead.get("budget_range") or None,
-                    lead.get("timeline") or None,
-                    lead.get("description") or lead.get("need_description") or None
-                )
-            )
+                RETURNING
+                    id,
+                    lead_reference,
+                    full_name AS contact_name,
+                    email,
+                    company,
+                    job_title,
+                    website,
+                    company_size,
+                    industry,
+                    country,
+                    source,
+                    need_description AS description,
+                    budget_range AS budget,
+                    timeline,
+                    status,
+                    priority,
+                    assigned_owner_id,
+                    duplicate_of_lead_id,
+                    consent_to_contact,
+                    created_at,
+                    updated_at
+            """, (
+                lead_reference,
+                contact_name,
+                lead.get("email", ""),
+                lead.get("company", ""),
+                lead.get("job_title", ""),
+                lead.get("website", ""),
+                lead.get("company_size", ""),
+                lead.get("industry", ""),
+                lead.get("country", ""),
+                lead.get("source", ""),
+                description,
+                budget,
+                lead.get("timeline", ""),
+                lead.get("status", "New"),
+                lead.get("priority", "Unqualified"),
+                lead.get("consent_to_contact", False)
+            ))
 
-            inserted_lead = cur.fetchone()
+            new_lead = dict(cur.fetchone())
 
-            lead_id = inserted_lead["id"]
-
-            cur.execute(
-                """
-                INSERT INTO workflow_events (
-                    lead_id,
-                    event_type,
-                    event_status,
-                    message,
-                    actor,
-                    details
-                )
-                VALUES (
-                    %s, %s, %s, %s, %s, %s::jsonb
-                )
-                """,
-                (
-                    lead_id,
-                    "lead_created",
-                    "completed",
-                    f"Lead {reference} was created and saved.",
-                    "lead_intake",
-                    json.dumps({
-                        "lead_reference": reference
-                    })
-                )
-            )
-
-    return reference
+    return new_lead
 
 
 # ============================================================
-# GET ALL LEADS
-# Maps actual database columns to app-facing names.
+# LEAD RETRIEVAL
 # ============================================================
 
-def get_leads():
+def get_leads(limit=500):
+    """Retrieve leads using app-friendly column names."""
 
     with _connect() as conn:
-
         with conn.cursor() as cur:
-
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT
                     id,
                     lead_reference,
                     full_name AS contact_name,
                     email,
                     company,
-                    website,
                     job_title,
+                    website,
+                    company_size,
                     industry,
                     country,
-                    company_size,
+                    source,
+                    need_description AS description,
                     budget_range AS budget,
                     timeline,
-                    need_description AS description,
                     status,
                     priority,
+                    assigned_owner_id,
+                    duplicate_of_lead_id,
+                    consent_to_contact,
                     created_at,
                     updated_at
                 FROM leads
                 ORDER BY created_at DESC
-                """
-            )
+                LIMIT %s
+            """, (limit,))
 
-            rows = cur.fetchall()
-
-    for row in rows:
-
-        row["id"] = str(row["id"])
-
-        row["created_at"] = str(
-            row["created_at"]
-        )
-
-        row["updated_at"] = str(
-            row["updated_at"]
-        )
-
-    return rows
+            return [dict(row) for row in cur.fetchall()]
 
 
-# ============================================================
-# WORKFLOW HISTORY
-# ============================================================
-
-def get_workflow_events(limit=250):
+def get_lead_by_id(lead_id):
+    """Retrieve one lead by its existing BIGINT ID."""
 
     with _connect() as conn:
-
         with conn.cursor() as cur:
-
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT
-                    e.event_type,
-                    e.message,
-                    e.actor,
-                    e.details,
-                    e.created_at,
+                    id,
+                    lead_reference,
+                    full_name AS contact_name,
+                    email,
+                    company,
+                    job_title,
+                    website,
+                    company_size,
+                    industry,
+                    country,
+                    source,
+                    need_description AS description,
+                    budget_range AS budget,
+                    timeline,
+                    status,
+                    priority,
+                    assigned_owner_id,
+                    duplicate_of_lead_id,
+                    consent_to_contact,
+                    created_at,
+                    updated_at
+                FROM leads
+                WHERE id = %s
+            """, (lead_id,))
+
+            row = cur.fetchone()
+
+    return dict(row) if row else None
+
+
+# ============================================================
+# LEAD UPDATES
+# ============================================================
+
+def update_lead_status(lead_id, status):
+    """Update the status of an existing lead."""
+
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE leads
+                SET
+                    status = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+            """, (status, lead_id))
+
+            return cur.rowcount > 0
+
+
+def update_lead_qualification(lead_id, priority=None):
+    """
+    Update the lead priority after AI qualification.
+
+    The qualification details themselves are stored separately
+    in qualification_results.
+    """
+
+    if not priority:
+        return False
+
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE leads
+                SET
+                    priority = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+            """, (priority, lead_id))
+
+            return cur.rowcount > 0
+
+
+# ============================================================
+# WORKFLOW EVENTS
+# ============================================================
+
+def create_workflow_event(
+    lead_id,
+    event_type,
+    event_status="completed",
+    message="",
+    details=None,
+    actor="system"
+):
+    """Save a workflow event for a lead."""
+
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO workflow_events (
+                    lead_id,
+                    event_type,
+                    event_status,
+                    message,
+                    details,
+                    actor
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                lead_id,
+                event_type,
+                event_status,
+                message,
+                Json(details or {}),
+                actor
+            ))
+
+            result = cur.fetchone()
+
+    return result["id"]
+
+
+def get_workflow_events(limit=200):
+    """Retrieve workflow history with lead information."""
+
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    we.id,
+                    we.lead_id,
                     l.lead_reference,
                     l.full_name AS contact_name,
-                    l.company
-                FROM workflow_events e
+                    l.company,
+                    we.event_type,
+                    we.event_status,
+                    we.message,
+                    we.details,
+                    we.actor,
+                    we.created_at
+                FROM workflow_events we
                 LEFT JOIN leads l
-                    ON l.id = e.lead_id
-                ORDER BY e.created_at DESC
+                    ON l.id = we.lead_id
+                ORDER BY we.created_at DESC
                 LIMIT %s
-                """,
-                (limit,)
-            )
+            """, (limit,))
 
-            rows = cur.fetchall()
-
-    for row in rows:
-
-        row["details"] = json.dumps(
-            row.get("details") or {},
-            default=str
-        )
-
-        row["created_at"] = str(
-            row["created_at"]
-        )
-
-    return rows
+            return [dict(row) for row in cur.fetchall()]
 
 
 # ============================================================
-# SAVE AI QUALIFICATION RESULT
-# Uses existing BIGINT lead_id.
+# AI QUALIFICATION RESULTS
 # ============================================================
 
-def save_qualification_result(lead_id, result):
+def save_qualification_result(
+    lead_id,
+    model_name,
+    score,
+    category,
+    reasoning,
+    missing_information=None,
+    recommended_next_action="",
+    human_review_required=False
+):
+    """Save an AI qualification result."""
 
     with _connect() as conn:
-
         with conn.cursor() as cur:
-
-            cur.execute(
-                """
+            cur.execute("""
                 INSERT INTO qualification_results (
                     lead_id,
                     model_name,
@@ -514,113 +575,64 @@ def save_qualification_result(lead_id, result):
                     recommended_next_action,
                     human_review_required
                 )
-                VALUES (
-                    %s, %s, %s, %s, %s,
-                    %s::jsonb, %s, %s
-                )
-                """,
-                (
-                    lead_id,
-                    result["model_name"],
-                    result["score"],
-                    result["category"],
-                    result["reasoning"],
-                    json.dumps(
-                        result["missing_information"]
-                    ),
-                    result["recommended_next_action"],
-                    result["human_review_required"]
-                )
-            )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                lead_id,
+                model_name,
+                score,
+                category,
+                reasoning,
+                Json(missing_information or []),
+                recommended_next_action,
+                human_review_required
+            ))
 
-            cur.execute(
-                """
-                INSERT INTO workflow_events (
-                    lead_id,
-                    event_type,
-                    event_status,
-                    message,
-                    actor,
-                    details
-                )
-                VALUES (
-                    %s, %s, %s, %s, %s, %s::jsonb
-                )
-                """,
-                (
-                    lead_id,
-                    "lead_ai_qualified",
-                    "completed",
-                    (
-                        f"AI qualification saved: "
-                        f"{result['score']}/100, "
-                        f"category {result['category']}."
-                    ),
-                    "groq_ai_qualification",
-                    json.dumps({
-                        key: result[key]
-                        for key in [
-                            "model_name",
-                            "score",
-                            "category",
-                            "priority"
-                        ]
-                        if key in result
-                    })
-                )
-            )
+            result = cur.fetchone()
+
+    return result["id"]
 
 
-# ============================================================
-# UPDATE LEAD QUALIFICATION
-# ============================================================
-
-def update_lead_qualification(
-    lead_id,
-    category,
-    priority
-):
-
-    status = (
-        "needs_review"
-        if category == "needs_review"
-        else "qualified"
-    )
+def get_qualification_results(limit=200):
+    """Retrieve AI qualification history with lead details."""
 
     with _connect() as conn:
-
         with conn.cursor() as cur:
-
-            cur.execute(
-                """
-                UPDATE leads
-                SET
-                    status = %s,
-                    priority = %s,
-                    updated_at = NOW()
-                WHERE id = %s
-                """,
-                (
-                    status,
-                    priority,
-                    lead_id
-                )
-            )
-
-
-# ============================================================
-# GET QUALIFICATION HISTORY FOR A LEAD
-# ============================================================
-
-def get_qualification_results(lead_id, limit=10):
-
-    with _connect() as conn:
-
-        with conn.cursor() as cur:
-
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT
+                    qr.id,
+                    qr.lead_id,
+                    l.lead_reference,
+                    l.full_name AS contact_name,
+                    l.email,
+                    l.company,
+                    qr.model_name,
+                    qr.score,
+                    qr.category,
+                    qr.reasoning,
+                    qr.missing_information,
+                    qr.recommended_next_action,
+                    qr.human_review_required,
+                    qr.created_at
+                FROM qualification_results qr
+                LEFT JOIN leads l
+                    ON l.id = qr.lead_id
+                ORDER BY qr.created_at DESC
+                LIMIT %s
+            """, (limit,))
+
+            return [dict(row) for row in cur.fetchall()]
+
+
+def get_qualification_by_lead_id(lead_id):
+    """Retrieve the latest qualification result for one lead."""
+
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    id,
+                    lead_id,
                     model_name,
                     score,
                     category,
@@ -632,25 +644,9 @@ def get_qualification_results(lead_id, limit=10):
                 FROM qualification_results
                 WHERE lead_id = %s
                 ORDER BY created_at DESC
-                LIMIT %s
-                """,
-                (
-                    lead_id,
-                    limit
-                )
-            )
+                LIMIT 1
+            """, (lead_id,))
 
-            rows = cur.fetchall()
+            row = cur.fetchone()
 
-    for row in rows:
-
-        row["missing_information"] = json.dumps(
-            row.get("missing_information") or [],
-            ensure_ascii=False
-        )
-
-        row["created_at"] = str(
-            row["created_at"]
-        )
-
-    return rows
+    return dict(row) if row else None
