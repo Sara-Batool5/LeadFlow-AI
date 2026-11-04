@@ -2,7 +2,7 @@
 import os
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
@@ -13,7 +13,6 @@ from psycopg2.extras import RealDictCursor, Json
 # ============================================================
 
 def get_database_url():
-    """Read the Neon connection string from Streamlit secrets or environment."""
     try:
         import streamlit as st
         value = st.secrets.get("NEON_DATABASE_URL")
@@ -22,21 +21,22 @@ def get_database_url():
     except Exception:
         pass
 
-    value = os.getenv("NEON_DATABASE_URL")
-    if not value:
+    return os.getenv("NEON_DATABASE_URL")
+
+
+def _connect():
+    database_url = get_database_url()
+
+    if not database_url:
         raise ValueError(
             "NEON_DATABASE_URL is missing. Add it to Streamlit Cloud secrets."
         )
 
-    return value
-
-
-def _connect():
     return psycopg2.connect(
-        get_database_url(),
+        database_url,
         sslmode="require",
-        connect_timeout=15,
-        cursor_factory=RealDictCursor
+        cursor_factory=RealDictCursor,
+        connect_timeout=20,
     )
 
 
@@ -44,37 +44,45 @@ def test_connection():
     try:
         with _connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT version() AS version")
-                result = cur.fetchone()
-
-        return True, result["version"]
-
+                cur.execute("SELECT version() AS version;")
+                row = cur.fetchone()
+        return True, row["version"]
     except Exception as exc:
         return False, str(exc)
 
 
-# ============================================================
-# DATABASE INITIALIZATION
-# Does not create, drop, or alter existing tables.
-# ============================================================
-
 def initialize_schema():
-    indexes = [
-        "CREATE INDEX IF NOT EXISTS idx_leads_email_lower ON leads (LOWER(email))",
-        "CREATE INDEX IF NOT EXISTS idx_leads_created_at ON leads (created_at DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_leads_status ON leads (status)",
-        "CREATE INDEX IF NOT EXISTS idx_leads_assigned_owner ON leads (assigned_owner_id)",
-        "CREATE INDEX IF NOT EXISTS idx_workflow_events_lead_id ON workflow_events (lead_id)",
-        "CREATE INDEX IF NOT EXISTS idx_qualification_results_lead_id ON qualification_results (lead_id)",
-        "CREATE INDEX IF NOT EXISTS idx_sales_owners_available ON sales_owners (is_available)"
+    """
+    Do not recreate or alter existing tables.
+    Only create safe indexes on the user's existing schema.
+    """
+    statements = [
+        """
+        CREATE INDEX IF NOT EXISTS idx_leads_created_at
+        ON leads (created_at DESC);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_leads_status
+        ON leads (status);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_leads_assigned_owner
+        ON leads (assigned_owner_id);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_workflow_events_lead
+        ON workflow_events (lead_id, created_at DESC);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_email_drafts_lead
+        ON email_drafts (lead_id, created_at DESC);
+        """,
     ]
 
     with _connect() as conn:
         with conn.cursor() as cur:
-            for statement in indexes:
+            for statement in statements:
                 cur.execute(statement)
-
-    return True
 
 
 def get_table_counts():
@@ -83,7 +91,7 @@ def get_table_counts():
         "workflow_events",
         "qualification_results",
         "sales_owners",
-        "email_drafts"
+        "email_drafts",
     ]
 
     counts = {}
@@ -91,170 +99,123 @@ def get_table_counts():
     with _connect() as conn:
         with conn.cursor() as cur:
             for table in tables:
-                cur.execute(f"SELECT COUNT(*) AS total FROM {table}")
-                counts[table] = int(cur.fetchone()["total"])
+                cur.execute(f"SELECT COUNT(*) AS total FROM {table};")
+                counts[table] = cur.fetchone()["total"]
 
     return counts
 
 
 # ============================================================
-# HELPER FUNCTIONS
+# GENERAL HELPERS
 # ============================================================
 
 def _clean(value):
     if value is None:
-        return None
-
-    value = str(value).strip()
-    return value if value else None
+        return ""
+    return str(value).strip()
 
 
 def _normal_text(value):
-    value = _clean(value)
-
-    if not value:
-        return None
-
-    return re.sub(r"\s+", " ", value).lower()
+    return re.sub(r"\s+", " ", _clean(value).lower())
 
 
 def _normal_website(value):
-    value = _clean(value)
-
-    if not value:
-        return None
-
-    value = value.lower().strip()
-    value = re.sub(r"^https?://", "", value)
-    value = re.sub(r"^www\.", "", value)
-
-    return value.rstrip("/")
+    website = _clean(value).lower()
+    website = re.sub(r"^https?://", "", website)
+    website = re.sub(r"^www\.", "", website)
+    return website.split("/")[0].strip()
 
 
 def _lead_value(lead, *keys):
     for key in keys:
         value = lead.get(key)
-
-        if value is not None and str(value).strip():
+        if value is not None and _clean(value):
             return value
-
     return None
 
 
-def _lead_reference():
+def _lead_reference(lead):
     return (
-        "LF-"
-        + datetime.now().strftime("%y%m%d")
-        + "-"
-        + uuid.uuid4().hex[:6].upper()
+        lead.get("lead_reference")
+        or f"LF-{datetime.now(timezone.utc).strftime('%y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
     )
 
 
 # ============================================================
-# DUPLICATE DETECTION
+# LEADS
 # ============================================================
 
 def find_potential_duplicates(lead):
     email = _normal_text(_lead_value(lead, "email"))
-    name = _normal_text(
-        _lead_value(lead, "contact_name", "full_name")
-    )
-    company = _normal_text(lead.get("company"))
-    website = _normal_website(lead.get("website"))
+    name = _normal_text(_lead_value(lead, "contact_name", "full_name"))
+    company = _normal_text(_lead_value(lead, "company"))
+    website = _normal_website(_lead_value(lead, "website"))
+
+    if not any([email, name]):
+        return []
+
+    query = """
+        SELECT
+            id,
+            lead_reference,
+            full_name AS contact_name,
+            email,
+            company,
+            website,
+            status,
+            created_at
+        FROM leads
+        WHERE
+            (%s <> '' AND LOWER(TRIM(COALESCE(email, ''))) = %s)
+            OR
+            (
+                %s <> ''
+                AND %s <> ''
+                AND LOWER(TRIM(COALESCE(full_name, ''))) = %s
+                AND LOWER(TRIM(COALESCE(company, ''))) = %s
+            )
+            OR
+            (
+                %s <> ''
+                AND %s <> ''
+                AND LOWER(TRIM(COALESCE(full_name, ''))) = %s
+                AND LOWER(
+                    REGEXP_REPLACE(
+                        REGEXP_REPLACE(COALESCE(website, ''), '^https?://', ''),
+                        '^www\\.',
+                        ''
+                    )
+                ) LIKE %s
+            )
+        ORDER BY created_at DESC
+        LIMIT 10;
+    """
+
+    website_pattern = website if website else ""
 
     with _connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    id,
-                    lead_reference,
-                    full_name AS contact_name,
-                    email,
-                    company,
-                    website,
-                    status,
-                    priority,
-                    created_at
-                FROM leads
-                ORDER BY created_at DESC
-                LIMIT 1000
-            """)
+            cur.execute(
+                query,
+                (
+                    email, email,
+                    name, company, name, company,
+                    name, website, name, website_pattern,
+                ),
+            )
+            return [dict(row) for row in cur.fetchall()]
 
-            rows = cur.fetchall()
-
-    matches = []
-
-    for row in rows:
-        row_email = _normal_text(row.get("email"))
-        row_name = _normal_text(row.get("contact_name"))
-        row_company = _normal_text(row.get("company"))
-        row_website = _normal_website(row.get("website"))
-
-        match_type = None
-
-        if email and row_email and email == row_email:
-            match_type = "exact_email"
-
-        elif (
-            name
-            and row_name
-            and company
-            and row_company
-            and name == row_name
-            and company == row_company
-        ):
-            match_type = "same_contact_company"
-
-        elif (
-            name
-            and row_name
-            and website
-            and row_website
-            and name == row_name
-            and website == row_website
-        ):
-            match_type = "same_contact_website"
-
-        if match_type:
-            item = dict(row)
-            item["match_type"] = match_type
-            item["created_at"] = str(item.get("created_at", ""))
-            matches.append(item)
-
-    return matches[:10]
-
-
-# ============================================================
-# LEAD CREATION
-# ============================================================
 
 def create_lead(lead):
-    full_name = _clean(
-        _lead_value(lead, "contact_name", "full_name")
-    )
-
-    email = _normal_text(lead.get("email"))
-
-    if not full_name:
-        raise ValueError("Contact name is required.")
-
-    if not email:
-        raise ValueError("Email is required.")
-
-    description = (
-        _clean(_lead_value(lead, "description", "need_description"))
-        or "Not provided"
-    )
-
-    reference = (
-        _clean(lead.get("lead_reference"))
-        or _lead_reference()
-    )
+    full_name = _clean(_lead_value(lead, "contact_name", "full_name"))
+    description = _clean(
+        _lead_value(lead, "description", "need_description")
+    ) or "Not provided"
 
     values = (
-        reference,
+        _lead_reference(lead),
         full_name,
-        email,
+        _clean(lead.get("email")),
         _clean(lead.get("company")),
         _clean(lead.get("job_title")),
         _clean(lead.get("website")),
@@ -267,1006 +228,586 @@ def create_lead(lead):
         _clean(lead.get("timeline")),
         _clean(lead.get("status")) or "new",
         _clean(lead.get("priority")) or "unassessed",
-        lead.get("assigned_owner_id"),
-        lead.get("duplicate_of_lead_id"),
-        bool(lead.get("consent_to_contact", False))
+        bool(lead.get("consent_to_contact", False)),
     )
 
+    query = """
+        INSERT INTO leads (
+            lead_reference,
+            full_name,
+            email,
+            company,
+            job_title,
+            website,
+            company_size,
+            industry,
+            country,
+            source,
+            need_description,
+            budget_range,
+            timeline,
+            status,
+            priority,
+            consent_to_contact,
+            created_at,
+            updated_at
+        )
+        VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, COALESCE(%s, 'Not provided'),
+            %s, %s, %s, %s, %s, NOW(), NOW()
+        )
+        RETURNING id, lead_reference;
+    """
+
     with _connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO leads (
-                    lead_reference,
-                    full_name,
-                    email,
-                    company,
-                    job_title,
-                    website,
-                    company_size,
-                    industry,
-                    country,
-                    source,
-                    need_description,
-                    budget_range,
-                    timeline,
-                    status,
-                    priority,
-                    assigned_owner_id,
-                    duplicate_of_lead_id,
-                    consent_to_contact
-                )
-                VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    COALESCE(%s, 'Not provided'),
-                    %s, %s, %s, %s, %s, %s, %s
-                )
-                RETURNING id
-            """, values)
-
-            lead_id = cur.fetchone()["id"]
-
-            cur.execute("""
-                INSERT INTO workflow_events (
-                    lead_id,
-                    event_type,
-                    event_status,
-                    message,
-                    details,
-                    actor
-                )
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (
-                lead_id,
-                "lead_created",
-                "completed",
-                f"Lead {reference} was created.",
-                Json({"lead_reference": reference}),
-                "lead_intake"
-            ))
-
-    return lead_id
+            cur.execute(query, values)
+            return dict(cur.fetchone())
 
 
-# ============================================================
-# LEAD RETRIEVAL
-# ============================================================
+def get_leads(search=""):
+    query = """
+        SELECT
+            l.id,
+            l.lead_reference,
+            l.full_name AS contact_name,
+            l.email,
+            l.company,
+            l.job_title,
+            l.website,
+            l.company_size,
+            l.industry,
+            l.country,
+            l.source,
+            l.need_description AS description,
+            l.budget_range AS budget,
+            l.timeline,
+            l.status,
+            l.priority,
+            l.assigned_owner_id,
+            l.duplicate_of_lead_id,
+            l.consent_to_contact,
+            l.created_at,
+            l.updated_at,
+            s.full_name AS assigned_owner,
+            s.email AS assigned_owner_email
+        FROM leads l
+        LEFT JOIN sales_owners s ON s.id = l.assigned_owner_id
+    """
 
-def get_leads(limit=1000):
+    params = []
+
+    if search:
+        query += """
+            WHERE
+                l.full_name ILIKE %s
+                OR l.email ILIKE %s
+                OR l.company ILIKE %s
+                OR l.lead_reference ILIKE %s
+        """
+        term = f"%{search}%"
+        params = [term, term, term, term]
+
+    query += " ORDER BY l.created_at DESC;"
+
     with _connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    l.id,
-                    l.lead_reference,
-                    l.full_name AS contact_name,
-                    l.email,
-                    l.company,
-                    l.job_title,
-                    l.website,
-                    l.company_size,
-                    l.industry,
-                    l.country,
-                    l.source,
-                    l.need_description AS description,
-                    l.budget_range AS budget,
-                    l.timeline,
-                    l.status,
-                    l.priority,
-                    l.assigned_owner_id,
-                    l.duplicate_of_lead_id,
-                    l.consent_to_contact,
-                    l.created_at,
-                    l.updated_at,
-                    so.full_name AS assigned_owner_name,
-                    so.email AS assigned_owner_email
-                FROM leads l
-                LEFT JOIN sales_owners so
-                    ON so.id = l.assigned_owner_id
-                ORDER BY l.created_at DESC
-                LIMIT %s
-            """, (limit,))
-
-            rows = cur.fetchall()
-
-    return [dict(row) for row in rows]
+            cur.execute(query, params)
+            return [dict(row) for row in cur.fetchall()]
 
 
 def get_lead_by_id(lead_id):
+    query = """
+        SELECT
+            l.*,
+            l.full_name AS contact_name,
+            l.need_description AS description,
+            l.budget_range AS budget,
+            s.full_name AS assigned_owner,
+            s.email AS assigned_owner_email
+        FROM leads l
+        LEFT JOIN sales_owners s ON s.id = l.assigned_owner_id
+        WHERE l.id = %s;
+    """
+
     with _connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    id,
-                    lead_reference,
-                    full_name AS contact_name,
-                    email,
-                    company,
-                    job_title,
-                    website,
-                    company_size,
-                    industry,
-                    country,
-                    source,
-                    need_description AS description,
-                    budget_range AS budget,
-                    timeline,
-                    status,
-                    priority,
-                    assigned_owner_id,
-                    duplicate_of_lead_id,
-                    consent_to_contact,
-                    created_at,
-                    updated_at
-                FROM leads
-                WHERE id = %s
-            """, (lead_id,))
-
+            cur.execute(query, (lead_id,))
             row = cur.fetchone()
-
-    return dict(row) if row else None
+            return dict(row) if row else None
 
 
 def update_lead_status(lead_id, status):
     with _connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 UPDATE leads
-                SET status = %s,
-                    updated_at = NOW()
-                WHERE id = %s
-            """, (status, lead_id))
+                SET status = %s, updated_at = NOW()
+                WHERE id = %s;
+                """,
+                (status, lead_id),
+            )
 
-            return cur.rowcount > 0
+
+def update_lead_qualification(lead_id, score, category):
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE leads
+                SET priority = %s, updated_at = NOW()
+                WHERE id = %s;
+                """,
+                (category, lead_id),
+            )
 
 
 # ============================================================
-# AI QUALIFICATION RESULTS
+# QUALIFICATION RESULTS
 # ============================================================
 
-def save_qualification_result(
-    lead_id,
-    result=None,
-    score=None,
-    category=None,
-    reasoning=None,
-    missing_information=None,
-    recommended_next_action=None,
-    human_review_required=True,
-    model_name="Groq"
-):
-    if isinstance(result, dict):
-        data = result
-    else:
-        data = {
-            "score": score,
-            "category": category,
-            "reasoning": reasoning,
-            "missing_information": missing_information or [],
-            "recommended_next_action": recommended_next_action,
-            "human_review_required": human_review_required,
-            "model_name": model_name
-        }
-
-    with _connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO qualification_results (
-                    lead_id,
-                    model_name,
-                    score,
-                    category,
-                    reasoning,
-                    missing_information,
-                    recommended_next_action,
-                    human_review_required
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-            """, (
-                lead_id,
-                data.get("model_name", "Groq"),
-                int(data.get("score", 0)),
-                data.get("category", "needs_review"),
-                data.get("reasoning", ""),
-                Json(data.get("missing_information", [])),
-                data.get("recommended_next_action", ""),
-                bool(data.get("human_review_required", True))
-            ))
-
-            result_id = cur.fetchone()["id"]
-
-            cur.execute("""
-                INSERT INTO workflow_events (
-                    lead_id,
-                    event_type,
-                    event_status,
-                    message,
-                    details,
-                    actor
-                )
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (
-                lead_id,
-                "lead_ai_qualified",
-                "completed",
-                f"AI qualification saved: {data.get('score', 0)}/100.",
-                Json({
-                    "score": data.get("score"),
-                    "category": data.get("category"),
-                    "priority": data.get("priority")
-                }),
-                "groq_ai_qualification"
-            ))
-
-    return result_id
-
-
-def update_lead_qualification(
-    lead_id,
-    category=None,
-    priority=None,
-    **kwargs
-):
-    if category is None:
-        category = kwargs.get("category")
-
-    if priority is None:
-        priority = kwargs.get("priority")
-
-    status = (
-        "needs_review"
-        if category == "needs_review"
-        else "qualified"
-    )
-
-    with _connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                UPDATE leads
-                SET priority = COALESCE(%s, priority),
-                    status = %s,
-                    updated_at = NOW()
-                WHERE id = %s
-            """, (priority, status, lead_id))
-
-            return cur.rowcount > 0
-
-
-def get_qualification_results(lead_id=None, limit=200):
-    sql = """
-        SELECT
-            qr.id,
-            qr.lead_id,
-            qr.model_name,
-            qr.score,
-            qr.category,
-            qr.reasoning,
-            qr.missing_information,
-            qr.recommended_next_action,
-            qr.human_review_required,
-            qr.created_at,
-            l.lead_reference,
-            l.full_name AS contact_name,
-            l.company
-        FROM qualification_results qr
-        LEFT JOIN leads l ON l.id = qr.lead_id
+def save_qualification_result(lead_id, result, model_name="Groq"):
+    query = """
+        INSERT INTO qualification_results (
+            lead_id,
+            model_name,
+            score,
+            category,
+            reasoning,
+            missing_information,
+            recommended_next_action,
+            human_review_required,
+            created_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+        RETURNING id;
     """
 
-    params = []
-
-    if lead_id is not None:
-        sql += " WHERE qr.lead_id = %s"
-        params.append(lead_id)
-
-    sql += " ORDER BY qr.created_at DESC LIMIT %s"
-    params.append(limit)
+    missing = result.get("missing_information", [])
+    if not isinstance(missing, list):
+        missing = [str(missing)]
 
     with _connect() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, tuple(params))
-            rows = cur.fetchall()
+            cur.execute(
+                query,
+                (
+                    lead_id,
+                    model_name,
+                    int(result.get("score", 0)),
+                    _clean(result.get("category")) or "Needs Review",
+                    _clean(result.get("reasoning")),
+                    Json(missing),
+                    _clean(result.get("recommended_next_action")),
+                    bool(result.get("human_review_required", True)),
+                ),
+            )
+            return dict(cur.fetchone())
 
-    return [dict(row) for row in rows]
+
+def get_qualification_results(lead_id):
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM qualification_results
+                WHERE lead_id = %s
+                ORDER BY created_at DESC;
+                """,
+                (lead_id,),
+            )
+            return [dict(row) for row in cur.fetchall()]
 
 
 # ============================================================
-# WORKFLOW EVENTS / AUDIT HISTORY
+# WORKFLOW HISTORY / AUDIT EVENTS
 # ============================================================
 
 def create_workflow_event(
     lead_id,
     event_type,
-    event_status="completed",
-    message=None,
-    details=None,
-    actor="LeadFlow AI"
-):
-    with _connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO workflow_events (
-                    lead_id,
-                    event_type,
-                    event_status,
-                    message,
-                    details,
-                    actor
-                )
-                VALUES (%s, %s, %s, %s, %s, %s)
-                RETURNING id
-            """, (
-                lead_id,
-                event_type,
-                event_status,
-                message,
-                Json(details or {}),
-                actor
-            ))
-
-            return cur.fetchone()["id"]
-
-
-def get_workflow_events(limit=250):
-    with _connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    we.id,
-                    we.lead_id,
-                    we.event_type,
-                    we.event_status,
-                    we.message,
-                    we.details,
-                    we.actor,
-                    we.created_at,
-                    l.lead_reference,
-                    l.full_name AS contact_name,
-                    l.company
-                FROM workflow_events we
-                LEFT JOIN leads l ON l.id = we.lead_id
-                ORDER BY we.created_at DESC
-                LIMIT %s
-            """, (limit,))
-
-            rows = cur.fetchall()
-
-    return [dict(row) for row in rows]
-
-
-# ============================================================
-# SALES OWNER MANAGEMENT
-# ============================================================
-
-def get_sales_owners(available_only=False):
-    sql = """
-        SELECT
-            id,
-            full_name,
-            email,
-            specialization,
-            is_available,
-            active_lead_limit,
-            created_at
-        FROM sales_owners
-    """
-
-    if available_only:
-        sql += " WHERE is_available = TRUE"
-
-    sql += " ORDER BY full_name"
-
-    with _connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql)
-            rows = cur.fetchall()
-
-    return [dict(row) for row in rows]
-
-
-def create_sales_owner(
-    full_name,
-    email,
-    specialization,
-    active_lead_limit=20,
-    is_available=True
-):
-    full_name = _clean(full_name)
-    email = _normal_text(email)
-    specialization = _clean(specialization) or "General"
-
-    if not full_name:
-        raise ValueError("Sales owner name is required.")
-
-    if not email or "@" not in email:
-        raise ValueError("A valid owner email is required.")
-
-    with _connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO sales_owners (
-                    full_name,
-                    email,
-                    specialization,
-                    is_available,
-                    active_lead_limit
-                )
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING id
-            """, (
-                full_name,
-                email,
-                specialization,
-                bool(is_available),
-                max(1, int(active_lead_limit))
-            ))
-
-            owner_id = cur.fetchone()["id"]
-
-            cur.execute("""
-                INSERT INTO workflow_events (
-                    lead_id,
-                    event_type,
-                    event_status,
-                    message,
-                    details,
-                    actor
-                )
-                VALUES (NULL, %s, %s, %s, %s, %s)
-            """, (
-                "sales_owner_created",
-                "completed",
-                f"Sales owner {full_name} was added to the roster.",
-                Json({
-                    "owner_id": owner_id,
-                    "specialization": specialization
-                }),
-                "sales_admin"
-            ))
-
-    return owner_id
-
-
-def update_sales_owner_availability(owner_id, is_available):
-    with _connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                UPDATE sales_owners
-                SET is_available = %s
-                WHERE id = %s
-            """, (bool(is_available), owner_id))
-
-            return cur.rowcount > 0
-
-
-def get_owner_workloads():
-    with _connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    so.id,
-                    so.full_name,
-                    so.email,
-                    so.specialization,
-                    so.is_available,
-                    so.active_lead_limit,
-                    COUNT(
-                        CASE
-                            WHEN l.id IS NOT NULL
-                             AND LOWER(COALESCE(l.status, '')) NOT IN (
-                                'converted',
-                                'disqualified',
-                                'closed_won',
-                                'closed_lost',
-                                'duplicate'
-                             )
-                            THEN 1
-                        END
-                    ) AS active_leads
-                FROM sales_owners so
-                LEFT JOIN leads l
-                    ON l.assigned_owner_id = so.id
-                GROUP BY
-                    so.id,
-                    so.full_name,
-                    so.email,
-                    so.specialization,
-                    so.is_available,
-                    so.active_lead_limit
-                ORDER BY so.full_name
-            """)
-
-            rows = cur.fetchall()
-
-    result = []
-
-    for row in rows:
-        item = dict(row)
-
-        item["active_leads"] = int(item["active_leads"] or 0)
-        item["active_lead_limit"] = int(
-            item["active_lead_limit"] or 0
-        )
-
-        item["remaining_capacity"] = max(
-            0,
-            item["active_lead_limit"] - item["active_leads"]
-        )
-
-        result.append(item)
-
-    return result
-
-
-# ============================================================
-# INTELLIGENT OWNER ASSIGNMENT
-# ============================================================
-
-def _specialization_match(specialization, lead):
-    """
-    Match an owner's specialization against the lead's industry
-    and company size.
-
-    Examples:
-    - Biotechnology
-    - Healthcare
-    - Enterprise
-    - SMB
-    - General
-    """
-
-    spec = _normal_text(specialization) or "general"
-
-    industry = _normal_text(lead.get("industry")) or ""
-    company_size = _normal_text(lead.get("company_size")) or ""
-
-    lead_description = f"{industry} {company_size}"
-
-    if spec in {
-        "general",
-        "all",
-        "any",
-        "all industries",
-        "*"
-    }:
-        return True
-
-    tokens = [
-        token.strip()
-        for token in re.split(r"[,;/|]+", spec)
-        if token.strip()
-    ]
-
-    if not tokens:
-        tokens = [spec]
-
-    return any(token in lead_description for token in tokens)
-
-
-def _assignment_event(
-    cur,
-    lead_id,
-    event_type,
-    status,
     message,
-    details
+    event_status="completed",
+    details=None,
+    actor="LeadFlow AI",
 ):
-    cur.execute("""
+    query = """
         INSERT INTO workflow_events (
             lead_id,
             event_type,
             event_status,
             message,
             details,
-            actor
+            actor,
+            created_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s)
-    """, (
-        lead_id,
-        event_type,
-        status,
-        message,
-        Json(details or {}),
-        "intelligent_assignment"
-    ))
-
-
-def assign_lead_automatically(lead_id):
-    """
-    Automatic assignment rules:
-
-    1. Exclude unavailable owners.
-    2. Exclude owners at their active-lead limit.
-    3. Prefer a specialization match.
-    4. Among eligible owners, select the lowest workload ratio.
-    5. Record the decision in workflow_events.
+        VALUES (%s, %s, %s, %s, %s, %s, NOW())
+        RETURNING id;
     """
 
     with _connect() as conn:
         with conn.cursor() as cur:
+            cur.execute(
+                query,
+                (
+                    lead_id,
+                    event_type,
+                    event_status,
+                    message,
+                    Json(details or {}),
+                    actor,
+                ),
+            )
+            return dict(cur.fetchone())
 
-            # Lock owner rows during selection.
-            cur.execute("""
-                SELECT
-                    id,
+
+def get_workflow_events(lead_id=None):
+    query = """
+        SELECT
+            w.id,
+            w.lead_id,
+            w.event_type,
+            w.event_status,
+            w.message,
+            w.details,
+            w.actor,
+            w.created_at,
+            l.lead_reference,
+            l.full_name AS contact_name,
+            l.company
+        FROM workflow_events w
+        LEFT JOIN leads l ON l.id = w.lead_id
+    """
+
+    params = []
+
+    if lead_id is not None:
+        query += " WHERE w.lead_id = %s"
+        params.append(lead_id)
+
+    query += " ORDER BY w.created_at DESC LIMIT 500;"
+
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            return [dict(row) for row in cur.fetchall()]
+
+
+# ============================================================
+# SALES OWNERS AND WORKLOAD
+# ============================================================
+
+def get_sales_owners():
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM sales_owners
+                ORDER BY full_name;
+                """
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def create_sales_owner(full_name, email, specialization, active_lead_limit):
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO sales_owners (
                     full_name,
                     email,
                     specialization,
                     is_available,
-                    active_lead_limit
-                FROM sales_owners
-                ORDER BY id
-                FOR UPDATE
-            """)
+                    active_lead_limit,
+                    created_at
+                )
+                VALUES (%s, %s, %s, TRUE, %s, NOW())
+                RETURNING id;
+                """,
+                (
+                    _clean(full_name),
+                    _clean(email),
+                    _clean(specialization),
+                    int(active_lead_limit),
+                ),
+            )
+            return dict(cur.fetchone())
 
-            owners = [
-                dict(row)
-                for row in cur.fetchall()
-            ]
 
-            cur.execute("""
+def update_sales_owner_availability(owner_id, is_available):
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE sales_owners
+                SET is_available = %s
+                WHERE id = %s;
+                """,
+                (bool(is_available), owner_id),
+            )
+
+
+def get_owner_workloads():
+    query = """
+        SELECT
+            s.id,
+            s.full_name,
+            s.email,
+            s.specialization,
+            s.is_available,
+            s.active_lead_limit,
+            COUNT(
+                CASE
+                    WHEN LOWER(COALESCE(l.status, '')) NOT IN
+                    ('closed', 'won', 'lost', 'disqualified')
+                    THEN 1
+                END
+            ) AS active_leads
+        FROM sales_owners s
+        LEFT JOIN leads l ON l.assigned_owner_id = s.id
+        GROUP BY s.id
+        ORDER BY s.full_name;
+    """
+
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            return [dict(row) for row in cur.fetchall()]
+
+
+def _specialization_match(specialization, lead):
+    specialization = _normal_text(specialization)
+
+    if not specialization or specialization in ("general", "all", "any"):
+        return False
+
+    searchable = " ".join(
+        [
+            _normal_text(lead.get("industry")),
+            _normal_text(lead.get("description")),
+            _normal_text(lead.get("company")),
+        ]
+    )
+
+    terms = [
+        item.strip()
+        for item in re.split(r"[,;/|]+", specialization)
+        if item.strip()
+    ]
+
+    return any(term in searchable for term in terms)
+
+
+def assign_lead_automatically(lead_id):
+    lead = get_lead_by_id(lead_id)
+
+    if not lead:
+        return False, "Lead not found.", None
+
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
                 SELECT
-                    id,
-                    lead_reference,
-                    full_name AS contact_name,
-                    company,
-                    industry,
-                    company_size,
-                    priority,
-                    status,
-                    assigned_owner_id
-                FROM leads
-                WHERE id = %s
-                FOR UPDATE
-            """, (lead_id,))
+                    s.id,
+                    s.full_name,
+                    s.specialization,
+                    s.is_available,
+                    s.active_lead_limit,
+                    COUNT(
+                        CASE
+                            WHEN LOWER(COALESCE(l.status, '')) NOT IN
+                            ('closed', 'won', 'lost', 'disqualified')
+                            THEN 1
+                        END
+                    ) AS active_leads
+                FROM sales_owners s
+                LEFT JOIN leads l ON l.assigned_owner_id = s.id
+                WHERE s.is_available = TRUE
+                GROUP BY s.id
+                FOR UPDATE OF s;
+                """
+            )
+            owners = [dict(row) for row in cur.fetchall()]
 
-            lead = cur.fetchone()
-
-            if not lead:
-                raise ValueError("Lead was not found.")
-
-            if lead.get("assigned_owner_id") is not None:
-                cur.execute("""
-                    SELECT full_name
-                    FROM sales_owners
-                    WHERE id = %s
-                """, (lead["assigned_owner_id"],))
-
-                existing = cur.fetchone()
-
-                return {
-                    "assigned": True,
-                    "already_assigned": True,
-                    "owner_name": (
-                        existing["full_name"]
-                        if existing else "Existing owner"
-                    ),
-                    "message": "This lead already has an assigned owner."
-                }
-
-            candidates = []
-
-            for owner in owners:
-
-                if not owner.get("is_available"):
-                    continue
-
-                capacity = int(
-                    owner.get("active_lead_limit") or 0
-                )
-
-                if capacity <= 0:
-                    continue
-
-                cur.execute("""
-                    SELECT COUNT(*) AS active_count
-                    FROM leads
-                    WHERE assigned_owner_id = %s
-                      AND LOWER(COALESCE(status, '')) NOT IN (
-                          'converted',
-                          'disqualified',
-                          'closed_won',
-                          'closed_lost',
-                          'duplicate'
-                      )
-                """, (owner["id"],))
-
-                active_count = int(
-                    cur.fetchone()["active_count"]
-                )
-
-                if active_count >= capacity:
-                    continue
-
-                specialist = _specialization_match(
-                    owner.get("specialization"),
-                    lead
-                )
-
-                utilization = active_count / capacity
-
-                candidates.append({
-                    **owner,
-                    "active_count": active_count,
-                    "capacity": capacity,
-                    "specialist_match": specialist,
-                    "utilization": utilization
-                })
-
-            if not candidates:
-                message = (
-                    "No available sales owner has remaining capacity. "
-                    "Lead remains unassigned."
-                )
-
-                _assignment_event(
-                    cur,
-                    lead_id,
-                    "owner_assignment_unavailable",
-                    "needs_review",
-                    message,
-                    {
-                        "lead_reference": lead["lead_reference"],
-                        "priority": lead.get("priority"),
-                        "reason": (
-                            "No available owner with remaining capacity"
-                        )
-                    }
-                )
-
-                return {
-                    "assigned": False,
-                    "owner_name": None,
-                    "message": message
-                }
-
-            specialists = [
-                owner
-                for owner in candidates
-                if owner["specialist_match"]
+            eligible = [
+                owner for owner in owners
+                if int(owner["active_leads"]) < int(owner["active_lead_limit"])
             ]
 
-            pool = specialists if specialists else candidates
+            if not eligible:
+                return False, "No available sales owner has remaining capacity.", None
 
-            selected = sorted(
-                pool,
+            matching = [
+                owner for owner in eligible
+                if _specialization_match(owner.get("specialization"), lead)
+            ]
+
+            candidates = matching if matching else eligible
+
+            candidates.sort(
                 key=lambda owner: (
-                    owner["utilization"],
-                    owner["active_count"],
-                    int(owner["id"])
+                    int(owner["active_leads"]) / max(
+                        int(owner["active_lead_limit"]), 1
+                    ),
+                    int(owner["active_leads"]),
                 )
-            )[0]
-
-            if selected["specialist_match"]:
-                specialization_reason = (
-                    "specialization match: "
-                    + str(selected.get("specialization"))
-                )
-            else:
-                specialization_reason = (
-                    "no exact specialization match; "
-                    "selected an eligible available owner"
-                )
-
-            reason = (
-                specialization_reason
-                + f"; workload {selected['active_count']}/"
-                + f"{selected['capacity']}"
-                + f"; lead priority {lead.get('priority') or 'unassessed'}"
             )
 
-            cur.execute("""
+            selected = candidates[0]
+
+            cur.execute(
+                """
                 UPDATE leads
-                SET assigned_owner_id = %s,
-                    status = CASE
-                        WHEN LOWER(COALESCE(status, ''))
-                            IN ('new', 'qualified')
-                        THEN 'assigned'
-                        ELSE status
-                    END,
-                    updated_at = NOW()
-                WHERE id = %s
-            """, (selected["id"], lead_id))
-
-            _assignment_event(
-                cur,
-                lead_id,
-                "owner_assigned",
-                "completed",
-                f"Lead assigned to {selected['full_name']}.",
-                {
-                    "lead_reference": lead["lead_reference"],
-                    "owner_id": selected["id"],
-                    "owner_name": selected["full_name"],
-                    "specialization": selected.get("specialization"),
-                    "active_leads_before_assignment": selected["active_count"],
-                    "active_lead_limit": selected["capacity"],
-                    "priority": lead.get("priority"),
-                    "assignment_reason": reason
-                }
+                SET assigned_owner_id = %s, updated_at = NOW()
+                WHERE id = %s;
+                """,
+                (selected["id"], lead_id),
             )
 
-            return {
-                "assigned": True,
-                "already_assigned": False,
-                "owner_id": selected["id"],
-                "owner_name": selected["full_name"],
-                "reason": reason,
-                "message": (
-                    f"Successfully assigned to {selected['full_name']}."
+            cur.execute(
+                """
+                INSERT INTO workflow_events (
+                    lead_id, event_type, event_status,
+                    message, details, actor, created_at
                 )
-            }
+                VALUES (%s, %s, %s, %s, %s, %s, NOW());
+                """,
+                (
+                    lead_id,
+                    "automatic_owner_assignment",
+                    "completed",
+                    f"Lead assigned automatically to {selected['full_name']}.",
+                    Json({
+                        "owner_id": selected["id"],
+                        "owner_name": selected["full_name"],
+                        "specialization": selected["specialization"],
+                    }),
+                    "LeadFlow AI",
+                ),
+            )
+
+    return True, f"Assigned to {selected['full_name']}.", selected
 
 
 def assign_lead_owner(lead_id, owner_id):
-    """Manually assign a lead while enforcing owner availability and capacity."""
-
     with _connect() as conn:
         with conn.cursor() as cur:
-
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT
-                    id,
-                    full_name,
-                    is_available,
-                    active_lead_limit
-                FROM sales_owners
-                WHERE id = %s
-                FOR UPDATE
-            """, (owner_id,))
-
+                    s.id,
+                    s.full_name,
+                    s.is_available,
+                    s.active_lead_limit,
+                    COUNT(
+                        CASE
+                            WHEN LOWER(COALESCE(l.status, '')) NOT IN
+                            ('closed', 'won', 'lost', 'disqualified')
+                            THEN 1
+                        END
+                    ) AS active_leads
+                FROM sales_owners s
+                LEFT JOIN leads l ON l.assigned_owner_id = s.id
+                WHERE s.id = %s
+                GROUP BY s.id
+                FOR UPDATE OF s;
+                """,
+                (owner_id,),
+            )
             owner = cur.fetchone()
 
             if not owner:
-                raise ValueError("Selected sales owner was not found.")
+                return False, "Sales owner not found."
 
             if not owner["is_available"]:
-                raise ValueError(
-                    "This sales owner is currently unavailable."
-                )
+                return False, "This sales owner is currently unavailable."
 
-            cur.execute("""
-                SELECT
-                    id,
-                    lead_reference,
-                    assigned_owner_id,
-                    status
-                FROM leads
-                WHERE id = %s
-                FOR UPDATE
-            """, (lead_id,))
+            if int(owner["active_leads"]) >= int(owner["active_lead_limit"]):
+                return False, "This sales owner has reached their lead capacity."
 
-            lead = cur.fetchone()
-
-            if not lead:
-                raise ValueError("Lead was not found.")
-
-            if lead["assigned_owner_id"] is not None:
-                raise ValueError(
-                    "This lead is already assigned. "
-                    "Unassign it before changing the owner."
-                )
-
-            cur.execute("""
-                SELECT COUNT(*) AS active_count
-                FROM leads
-                WHERE assigned_owner_id = %s
-                  AND LOWER(COALESCE(status, '')) NOT IN (
-                      'converted',
-                      'disqualified',
-                      'closed_won',
-                      'closed_lost',
-                      'duplicate'
-                  )
-            """, (owner_id,))
-
-            active_count = int(
-                cur.fetchone()["active_count"]
-            )
-
-            capacity = int(
-                owner["active_lead_limit"] or 0
-            )
-
-            if capacity <= 0 or active_count >= capacity:
-                raise ValueError(
-                    "This sales owner has reached their active-lead limit."
-                )
-
-            cur.execute("""
+            cur.execute(
+                """
                 UPDATE leads
-                SET assigned_owner_id = %s,
-                    status = CASE
-                        WHEN LOWER(COALESCE(status, ''))
-                            IN ('new', 'qualified')
-                        THEN 'assigned'
-                        ELSE status
-                    END,
-                    updated_at = NOW()
-                WHERE id = %s
-            """, (owner_id, lead_id))
-
-            _assignment_event(
-                cur,
-                lead_id,
-                "owner_assigned_manually",
-                "completed",
-                f"Lead manually assigned to {owner['full_name']}.",
-                {
-                    "lead_reference": lead["lead_reference"],
-                    "owner_id": owner_id,
-                    "owner_name": owner["full_name"],
-                    "active_leads_before_assignment": active_count,
-                    "active_lead_limit": capacity,
-                    "assignment_reason": (
-                        "Manual assignment by administrator"
-                    )
-                }
+                SET assigned_owner_id = %s, updated_at = NOW()
+                WHERE id = %s;
+                """,
+                (owner_id, lead_id),
             )
 
-    return True
+            cur.execute(
+                """
+                INSERT INTO workflow_events (
+                    lead_id, event_type, event_status,
+                    message, details, actor, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, NOW());
+                """,
+                (
+                    lead_id,
+                    "manual_owner_assignment",
+                    "completed",
+                    f"Lead manually assigned to {owner['full_name']}.",
+                    Json({
+                        "owner_id": owner_id,
+                        "owner_name": owner["full_name"],
+                    }),
+                    "Administrator",
+                ),
+            )
+
+    return True, f"Lead assigned to {owner['full_name']}."
 
 
 def unassign_lead_owner(lead_id):
-    """Remove an assignment and return the lead to the unassigned queue."""
-
     with _connect() as conn:
         with conn.cursor() as cur:
-
-            cur.execute("""
-                SELECT
-                    l.id,
-                    l.lead_reference,
-                    l.assigned_owner_id,
-                    so.full_name AS owner_name
+            cur.execute(
+                """
+                SELECT s.full_name
                 FROM leads l
-                LEFT JOIN sales_owners so
-                    ON so.id = l.assigned_owner_id
-                WHERE l.id = %s
-                FOR UPDATE OF l
-            """, (lead_id,))
+                LEFT JOIN sales_owners s ON s.id = l.assigned_owner_id
+                WHERE l.id = %s;
+                """,
+                (lead_id,),
+            )
+            row = cur.fetchone()
 
-            lead = cur.fetchone()
-
-            if not lead:
-                raise ValueError("Lead was not found.")
-
-            if lead["assigned_owner_id"] is None:
-                return False
-
-            previous_owner_id = lead["assigned_owner_id"]
-            previous_owner_name = lead.get("owner_name")
-
-            cur.execute("""
+            cur.execute(
+                """
                 UPDATE leads
-                SET assigned_owner_id = NULL,
-                    status = CASE
-                        WHEN LOWER(COALESCE(status, '')) = 'assigned'
-                        THEN 'qualified'
-                        ELSE status
-                    END,
-                    updated_at = NOW()
-                WHERE id = %s
-            """, (lead_id,))
-
-            _assignment_event(
-                cur,
-                lead_id,
-                "owner_unassigned",
-                "completed",
-                "Lead returned to the unassigned queue.",
-                {
-                    "lead_reference": lead["lead_reference"],
-                    "previous_owner_id": previous_owner_id,
-                    "previous_owner_name": previous_owner_name
-                }
+                SET assigned_owner_id = NULL, updated_at = NOW()
+                WHERE id = %s;
+                """,
+                (lead_id,),
             )
 
-    return True
+            cur.execute(
+                """
+                INSERT INTO workflow_events (
+                    lead_id, event_type, event_status,
+                    message, details, actor, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, NOW());
+                """,
+                (
+                    lead_id,
+                    "owner_unassigned",
+                    "completed",
+                    "Sales owner assignment was removed.",
+                    Json({"previous_owner": row["full_name"] if row else None}),
+                    "Administrator",
+                ),
+            )
 
 
 # ============================================================
-# EMAIL DRAFT FUNCTIONS
-# Used in Step 7.
+# EMAIL DRAFTS — STEP 7
 # ============================================================
 
 def save_email_draft(
@@ -1274,63 +815,217 @@ def save_email_draft(
     recipient_email,
     subject,
     body,
-    draft_status="draft"
+    draft_id=None,
 ):
+    """
+    Create a new draft, or update an existing draft.
+    Saving content resets the status to draft.
+    """
+
+    recipient_email = _clean(recipient_email)
+    subject = _clean(subject)
+    body = _clean(body)
+
+    if not recipient_email:
+        raise ValueError("Recipient email is required.")
+
+    if not subject:
+        raise ValueError("Email subject is required.")
+
+    if not body:
+        raise ValueError("Email body is required.")
+
     with _connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO email_drafts (
-                    lead_id,
-                    recipient_email,
-                    subject,
-                    body,
-                    draft_status
+            if draft_id:
+                cur.execute(
+                    """
+                    UPDATE email_drafts
+                    SET
+                        recipient_email = %s,
+                        subject = %s,
+                        body = %s,
+                        draft_status = 'draft',
+                        approved_by = NULL,
+                        approved_at = NULL,
+                        updated_at = NOW()
+                    WHERE id = %s AND lead_id = %s
+                    RETURNING id;
+                    """,
+                    (recipient_email, subject, body, draft_id, lead_id),
                 )
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING id
-            """, (
-                lead_id,
-                recipient_email,
-                subject,
-                body,
-                draft_status
-            ))
+                result = cur.fetchone()
 
-            return cur.fetchone()["id"]
+                if not result:
+                    raise ValueError("The selected email draft could not be found.")
+
+                saved_id = result["id"]
+                event_type = "email_draft_updated"
+                message = "Follow-up email draft was updated."
+
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO email_drafts (
+                        lead_id,
+                        recipient_email,
+                        subject,
+                        body,
+                        draft_status,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, 'draft', NOW(), NOW())
+                    RETURNING id;
+                    """,
+                    (lead_id, recipient_email, subject, body),
+                )
+                saved_id = cur.fetchone()["id"]
+                event_type = "email_draft_created"
+                message = "A new follow-up email draft was saved."
+
+            cur.execute(
+                """
+                INSERT INTO workflow_events (
+                    lead_id,
+                    event_type,
+                    event_status,
+                    message,
+                    details,
+                    actor,
+                    created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, NOW());
+                """,
+                (
+                    lead_id,
+                    event_type,
+                    "completed",
+                    message,
+                    Json({
+                        "email_draft_id": saved_id,
+                        "recipient_email": recipient_email,
+                        "subject": subject,
+                    }),
+                    "LeadFlow AI",
+                ),
+            )
+
+    return saved_id
 
 
-def get_email_drafts(lead_id=None, limit=200):
-    sql = """
+def get_email_drafts(lead_id=None):
+    query = """
         SELECT
-            ed.id,
-            ed.lead_id,
-            ed.recipient_email,
-            ed.subject,
-            ed.body,
-            ed.draft_status,
-            ed.approved_by,
-            ed.approved_at,
-            ed.created_at,
-            ed.updated_at,
+            e.id,
+            e.lead_id,
+            e.recipient_email,
+            e.subject,
+            e.body,
+            e.draft_status,
+            e.approved_by,
+            e.approved_at,
+            e.created_at,
+            e.updated_at,
             l.lead_reference,
             l.full_name AS contact_name,
             l.company
-        FROM email_drafts ed
-        LEFT JOIN leads l ON l.id = ed.lead_id
+        FROM email_drafts e
+        LEFT JOIN leads l ON l.id = e.lead_id
     """
 
     params = []
 
     if lead_id is not None:
-        sql += " WHERE ed.lead_id = %s"
+        query += " WHERE e.lead_id = %s"
         params.append(lead_id)
 
-    sql += " ORDER BY ed.created_at DESC LIMIT %s"
-    params.append(limit)
+    query += " ORDER BY e.updated_at DESC;"
 
     with _connect() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, tuple(params))
-            rows = cur.fetchall()
+            cur.execute(query, params)
+            return [dict(row) for row in cur.fetchall()]
 
-    return [dict(row) for row in rows]
+
+def approve_email_draft(draft_id, approved_by="Administrator"):
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE email_drafts
+                SET
+                    draft_status = 'approved',
+                    approved_by = %s,
+                    approved_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING lead_id, recipient_email, subject;
+                """,
+                (approved_by, draft_id),
+            )
+            draft = cur.fetchone()
+
+            if not draft:
+                return False, "Email draft not found."
+
+            cur.execute(
+                """
+                INSERT INTO workflow_events (
+                    lead_id, event_type, event_status,
+                    message, details, actor, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, NOW());
+                """,
+                (
+                    draft["lead_id"],
+                    "email_draft_approved",
+                    "completed",
+                    "Follow-up email draft was approved. No email was sent.",
+                    Json({
+                        "email_draft_id": draft_id,
+                        "recipient_email": draft["recipient_email"],
+                        "subject": draft["subject"],
+                    }),
+                    approved_by,
+                ),
+            )
+
+    return True, "Draft approved. No email was sent."
+
+
+def delete_email_draft(draft_id):
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM email_drafts
+                WHERE id = %s
+                RETURNING lead_id;
+                """,
+                (draft_id,),
+            )
+            row = cur.fetchone()
+
+            if not row:
+                return False
+
+            cur.execute(
+                """
+                INSERT INTO workflow_events (
+                    lead_id, event_type, event_status,
+                    message, details, actor, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, NOW());
+                """,
+                (
+                    row["lead_id"],
+                    "email_draft_deleted",
+                    "completed",
+                    "A saved email draft was deleted.",
+                    Json({"email_draft_id": draft_id}),
+                    "Administrator",
+                ),
+            )
+
+    return True
