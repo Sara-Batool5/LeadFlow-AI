@@ -115,6 +115,26 @@ st.markdown(
         margin-top: -8px;
     }
 
+    .detail-card {
+        background: rgba(30, 41, 59, 0.65);
+        border: 1px solid rgba(148, 163, 184, 0.20);
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 12px;
+    }
+
+    .detail-label {
+        color: #aab6ca;
+        font-size: 0.82rem;
+        margin-bottom: 5px;
+    }
+
+    .detail-value {
+        color: #f8fafc;
+        font-size: 1rem;
+        font-weight: 600;
+    }
+
     </style>
     """,
     unsafe_allow_html=True,
@@ -128,6 +148,13 @@ st.markdown(
 def normalize_category(value):
     value = str(value or "").strip().lower()
     return value.replace(" ", "_").replace("-", "_")
+
+
+def humanize_value(value):
+    if value is None:
+        return "—"
+
+    return str(value).replace("_", " ").replace("-", " ").title()
 
 
 def format_datetime(value):
@@ -168,6 +195,113 @@ def make_dataframe(rows):
 
 def show_empty(message):
     st.info(message)
+
+
+def show_qualification_details(details):
+    """
+    Display AI qualification event details in a readable format.
+    """
+
+    score = details.get("score")
+    category = details.get("category")
+    reasoning = details.get("reasoning")
+    missing_information = details.get("missing_information", [])
+    human_review = details.get("human_review_required")
+    next_action = details.get("recommended_next_action")
+
+    st.subheader("AI Qualification Result")
+
+    score_col, category_col, review_col = st.columns(3)
+
+    with score_col:
+        st.metric(
+            "Qualification Score",
+            f"{score}/100" if score is not None else "—",
+        )
+
+    with category_col:
+        st.metric(
+            "Qualification Category",
+            humanize_value(category) if category else "—",
+        )
+
+    with review_col:
+        if human_review is True:
+            review_label = "Required"
+        elif human_review is False:
+            review_label = "Not Required"
+        else:
+            review_label = "Not Specified"
+
+        st.metric(
+            "Human Review",
+            review_label,
+        )
+
+    st.markdown("#### AI Reasoning")
+
+    if reasoning:
+        st.info(reasoning)
+    else:
+        st.write("No reasoning was stored for this event.")
+
+    st.markdown("#### Missing Information")
+
+    if isinstance(missing_information, list) and missing_information:
+        for item in missing_information:
+            st.markdown(f"- {humanize_value(item)}")
+
+    elif missing_information:
+        st.write(missing_information)
+
+    else:
+        st.success("No missing information was recorded.")
+
+    st.markdown("#### Recommended Next Action")
+
+    if next_action:
+        st.success(next_action)
+    else:
+        st.write("No next action was recorded.")
+
+
+def show_event_details(details):
+    """
+    Choose a readable display based on the event's stored details.
+    """
+
+    if not details:
+        st.info("No additional details were stored for this event.")
+        return
+
+    if not isinstance(details, dict):
+        st.json(details)
+        return
+
+    qualification_keys = {
+        "score",
+        "category",
+        "reasoning",
+        "missing_information",
+        "human_review_required",
+        "recommended_next_action",
+    }
+
+    if qualification_keys.intersection(details.keys()):
+        show_qualification_details(details)
+
+        other_details = {
+            key: value
+            for key, value in details.items()
+            if key not in qualification_keys
+        }
+
+        if other_details:
+            with st.expander("Other stored event information"):
+                st.json(other_details)
+
+    else:
+        st.json(details)
 
 
 # ============================================================
@@ -335,49 +469,17 @@ st.caption(
 
 metric_row1 = st.columns(4)
 
-metric_row1[0].metric(
-    "Total Leads",
-    total_leads,
-)
-
-metric_row1[1].metric(
-    "Active Leads",
-    len(active_leads),
-)
-
-metric_row1[2].metric(
-    "Assigned Leads",
-    len(assigned_leads),
-)
-
-metric_row1[3].metric(
-    "Unassigned Leads",
-    len(unassigned_leads),
-)
-
+metric_row1[0].metric("Total Leads", total_leads)
+metric_row1[1].metric("Active Leads", len(active_leads))
+metric_row1[2].metric("Assigned Leads", len(assigned_leads))
+metric_row1[3].metric("Unassigned Leads", len(unassigned_leads))
 
 metric_row2 = st.columns(4)
 
-metric_row2[0].metric(
-    "AI Qualified",
-    qualified_count,
-)
-
-metric_row2[1].metric(
-    "Needs Review",
-    needs_review_count,
-)
-
-metric_row2[2].metric(
-    "Approved Drafts",
-    len(approved_drafts),
-)
-
-metric_row2[3].metric(
-    "Workflow Errors",
-    len(failed_events),
-)
-
+metric_row2[0].metric("AI Qualified", qualified_count)
+metric_row2[1].metric("Needs Review", needs_review_count)
+metric_row2[2].metric("Approved Drafts", len(approved_drafts))
+metric_row2[3].metric("Workflow Errors", len(failed_events))
 
 st.divider()
 
@@ -398,7 +500,6 @@ for lead in leads:
     status = str(lead.get("status") or "unknown").strip().lower()
     status_counts[status] = status_counts.get(status, 0) + 1
 
-
 priority_counts = {}
 
 for lead in leads:
@@ -407,7 +508,6 @@ for lead in leads:
     ).strip().lower()
 
     priority_counts[priority] = priority_counts.get(priority, 0) + 1
-
 
 pipeline_col1, pipeline_col2 = st.columns(2)
 
@@ -468,7 +568,6 @@ with pipeline_col2:
         )
     else:
         show_empty("No priority information is available.")
-
 
 st.divider()
 
@@ -534,7 +633,7 @@ with qualification_col2:
                 "Contact": lead.get("contact_name"),
                 "Company": lead.get("company"),
                 "Score": result.get("score"),
-                "Category": result.get("category"),
+                "Category": humanize_value(result.get("category")),
                 "Human Review": (
                     "Yes"
                     if result.get("human_review_required")
@@ -551,7 +650,6 @@ with qualification_col2:
         )
     else:
         show_empty("No qualification records are available.")
-
 
 st.divider()
 
@@ -622,7 +720,6 @@ else:
         "Add owners in Assignment & Follow-up."
     )
 
-
 st.divider()
 
 
@@ -646,7 +743,7 @@ if leads:
                 "Status": lead.get("status"),
                 "Priority": lead.get("priority"),
                 "Qualification": (
-                    qualification.get("category")
+                    humanize_value(qualification.get("category"))
                     if qualification
                     else "Not assessed"
                 ),
@@ -663,7 +760,6 @@ if leads:
 
 else:
     show_empty("No leads have been submitted yet.")
-
 
 st.divider()
 
@@ -702,7 +798,6 @@ if events:
 
 else:
     show_empty("No workflow events have been recorded yet.")
-
 
 st.divider()
 
@@ -844,18 +939,10 @@ else:
 
         with detail_col1:
             st.markdown("**Event Information**")
-            st.write(
-                f"Event ID: {selected_event.get('id')}"
-            )
-            st.write(
-                f"Event type: {selected_event.get('event_type')}"
-            )
-            st.write(
-                f"Status: {selected_event.get('event_status')}"
-            )
-            st.write(
-                f"Actor: {selected_event.get('actor')}"
-            )
+            st.write(f"Event ID: {selected_event.get('id')}")
+            st.write(f"Event type: {selected_event.get('event_type')}")
+            st.write(f"Status: {selected_event.get('event_status')}")
+            st.write(f"Actor: {selected_event.get('actor')}")
             st.write(
                 f"Date: {format_datetime(selected_event.get('created_at'))}"
             )
@@ -865,28 +952,22 @@ else:
             st.write(
                 selected_event.get("lead_reference") or "System event"
             )
-            st.write(
-                selected_event.get("contact_name") or "—"
-            )
-            st.write(
-                selected_event.get("company") or "—"
-            )
+            st.write(selected_event.get("contact_name") or "—")
+            st.write(selected_event.get("company") or "—")
             st.markdown("**Event Message**")
             st.write(selected_event.get("message") or "No message.")
 
-        st.markdown("**Stored Event Details**")
+        st.divider()
+        st.markdown("### Stored Event Details")
 
-        details = safe_json(
-            selected_event.get("details")
-        )
+        details = safe_json(selected_event.get("details"))
 
-        st.json(details)
+        show_event_details(details)
 
     else:
         show_empty(
             "No events match the selected filters."
         )
-
 
 st.divider()
 
@@ -899,20 +980,9 @@ st.header("Email Draft Overview")
 
 draft_col1, draft_col2, draft_col3 = st.columns(3)
 
-draft_col1.metric(
-    "Total Drafts",
-    len(drafts),
-)
-
-draft_col2.metric(
-    "Pending Review",
-    len(pending_drafts),
-)
-
-draft_col3.metric(
-    "Approved",
-    len(approved_drafts),
-)
+draft_col1.metric("Total Drafts", len(drafts))
+draft_col2.metric("Pending Review", len(pending_drafts))
+draft_col3.metric("Approved", len(approved_drafts))
 
 if drafts:
     draft_rows = []
