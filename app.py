@@ -137,52 +137,77 @@ st.markdown(
         margin-bottom: 18px;
     }
 
-    /* Consistent custom sidebar section styling */
+    /* All four sidebar section labels use the same blue button appearance */
     .sidebar-section {
-        color: #ffffff !important;
-        font-size: 0.75rem;
-        font-weight: 800;
-        letter-spacing: 1.2px;
-        margin-top: 14px;
-        margin-bottom: 7px;
         display: flex;
         align-items: center;
-        gap: 8px;
-    }
-
-    /* Style the three navigation buttons like sidebar sections */
-    [data-testid="stSidebar"] .stButton > button {
-        background: transparent !important;
-        border: none !important;
-        box-shadow: none !important;
-        color: #ffffff !important;
         width: 100%;
-        min-height: 38px;
-        padding: 7px 0;
-        text-align: left;
-        justify-content: flex-start;
+        box-sizing: border-box;
+        background: #2563eb;
+        color: #ffffff !important;
         font-size: 0.75rem;
         font-weight: 800;
         letter-spacing: 1.2px;
-        border-radius: 6px;
+        line-height: 1.2;
+        padding: 11px 12px;
+        margin: 8px 0 8px;
+        border-radius: 8px;
+        text-align: left;
+    }
+
+    /* Functional navigation buttons match the APP section label */
+    [data-testid="stSidebar"] .stButton {
+        margin: 0 0 8px 0;
+    }
+
+    [data-testid="stSidebar"] .stButton > button {
+        display: flex !important;
+        align-items: center !important;
+        justify-content: flex-start !important;
+        width: 100%;
+        min-height: 39px;
+        box-sizing: border-box;
+        padding: 11px 12px !important;
+        margin: 0 !important;
+        background: #2563eb !important;
+        border: 1px solid #2563eb !important;
+        border-radius: 8px !important;
+        box-shadow: none !important;
+        color: #ffffff !important;
+        text-align: left !important;
+        font-size: 0.75rem !important;
+        font-weight: 800 !important;
+        letter-spacing: 1.2px !important;
+        line-height: 1.2 !important;
     }
 
     [data-testid="stSidebar"] .stButton > button p {
+        width: 100%;
+        margin: 0 !important;
         color: #ffffff !important;
-        font-size: 0.75rem;
-        font-weight: 800;
-        letter-spacing: 1.2px;
+        text-align: left !important;
+        font-size: 0.75rem !important;
+        font-weight: 800 !important;
+        letter-spacing: 1.2px !important;
+        line-height: 1.2 !important;
     }
 
     [data-testid="stSidebar"] .stButton > button:hover {
-        background: rgba(167, 139, 250, 0.12) !important;
-        border: none !important;
+        background: #1d4ed8 !important;
+        border-color: #1d4ed8 !important;
         color: #ffffff !important;
     }
 
     [data-testid="stSidebar"] .stButton > button:focus {
-        box-shadow: none !important;
-        border: none !important;
+        box-shadow: 0 0 0 2px rgba(147, 197, 253, 0.45) !important;
+        border-color: #93c5fd !important;
+    }
+
+    /* Keep the APP radio options close to their section label */
+    [data-testid="stSidebar"] [role="radiogroup"] {
+        gap: 0.15rem;
+        margin-top: 0;
+        margin-bottom: 8px;
     }
 
     </style>
@@ -495,8 +520,6 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-    st.divider()
-
     # SECTION 1 — APP
     st.markdown(
         '<div class="sidebar-section">APP</div>',
@@ -517,37 +540,29 @@ with st.sidebar:
         label_visibility="collapsed",
     )
 
-    st.divider()
-
     # SECTION 2 — AGENT WORKFLOW
     if st.button(
-        "🤖  AGENT WORKFLOW",
+        "AGENT WORKFLOW",
         key="nav_agent_workflow",
         use_container_width=True,
     ):
         st.switch_page("pages/8_Agent_Workflow.py")
 
-    st.divider()
-
     # SECTION 3 — DASHBOARD & AUDIT
     if st.button(
-        "📊  DASHBOARD & AUDIT",
+        "DASHBOARD & AUDIT",
         key="nav_dashboard_audit",
         use_container_width=True,
     ):
         st.switch_page("pages/9_Dashboard_Audit.py")
 
-    st.divider()
-
     # SECTION 4 — HUMAN REVIEW CENTER
     if st.button(
-        "🛡️  HUMAN REVIEW CENTER",
+        "HUMAN REVIEW CENTER",
         key="nav_human_review_center",
         use_container_width=True,
     ):
         st.switch_page("pages/10_Human_Review_Center.py")
-
-    st.divider()
 
     if db_connected:
         st.success("Database connected")
