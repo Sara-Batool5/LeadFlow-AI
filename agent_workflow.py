@@ -28,21 +28,16 @@ class LeadWorkflowState(TypedDict, total=False):
     lead_data: dict
     allow_duplicate: bool
     duplicate_matches: list
-
     lead_id: int
     lead: dict
     lead_reference: str
-
     qualification: dict
-
     assignment_success: bool
     assignment_message: str
     assigned_owner: dict
-
     draft_id: int
     email_subject: str
     email_body: str
-
     stage: str
     route: str
     error: str
@@ -92,23 +87,19 @@ def get_groq_model():
 
 def clean_json_response(content):
     content = (content or "").strip()
-
     content = re.sub(
         r"^```(?:json)?\s*",
         "",
         content,
         flags=re.IGNORECASE,
     )
-
     content = re.sub(r"\s*```$", "", content)
-
     return content.strip()
 
 
-def normalize_qualification_category(category):
+def normalize_qualification_category(category, score=None):
     """
-    Convert AI-generated category variations into the exact
-    category values accepted by the Neon database.
+    Guarantee that only a database-approved category is returned.
     """
 
     original = str(category or "").strip().lower()
@@ -117,7 +108,7 @@ def normalize_qualification_category(category):
     normalized = re.sub(r"[^a-z_]", "", normalized)
     normalized = re.sub(r"_+", "_", normalized).strip("_")
 
-    category_aliases = {
+    aliases = {
         "high": "high_fit",
         "highfit": "high_fit",
         "high_potential": "high_fit",
@@ -140,15 +131,22 @@ def normalize_qualification_category(category):
         "manual_review": "needs_review",
     }
 
-    normalized_category = category_aliases.get(
-        normalized,
-        "needs_review",
-    )
+    result = aliases.get(normalized)
 
-    if normalized_category not in ALLOWED_QUALIFICATION_CATEGORIES:
-        normalized_category = "needs_review"
+    if result not in ALLOWED_QUALIFICATION_CATEGORIES:
+        if score is None:
+            result = "needs_review"
+        elif score >= 80:
+            result = "high_fit"
+        elif score >= 50:
+            result = "medium_fit"
+        else:
+            result = "low_fit"
 
-    return normalized_category
+    if result not in ALLOWED_QUALIFICATION_CATEGORIES:
+        result = "needs_review"
+
+    return result
 
 
 # ============================================================
@@ -190,7 +188,6 @@ def intake_validation_agent(state: LeadWorkflowState):
         }
 
     lead["contact_name"] = contact_name
-
     lead["description"] = (
         lead.get("description")
         or lead.get("need_description")
@@ -214,7 +211,6 @@ def intake_validation_agent(state: LeadWorkflowState):
 
 def duplicate_detection_agent(state: LeadWorkflowState):
     lead_data = state["lead_data"]
-
     matches = find_potential_duplicates(lead_data)
 
     if matches and not state.get("allow_duplicate", False):
@@ -301,38 +297,30 @@ Budget: {lead.get('budget')}
 Timeline: {lead.get('timeline')}
 Business need: {lead.get('description')}
 
-Return valid JSON only using this structure:
+Return valid JSON only:
 
 {{
     "score": 0,
     "category": "needs_review",
     "reasoning": "Short explanation",
-    "missing_information": ["item 1"],
+    "missing_information": [],
     "recommended_next_action": "Specific next action",
     "human_review_required": true
 }}
 
-IMPORTANT CATEGORY RULES
+CATEGORY VALUES:
+high_fit
+medium_fit
+low_fit
+needs_review
 
-The category MUST be exactly ONE of these values:
-
-- high_fit
-- medium_fit
-- low_fit
-- needs_review
-
-Do not use spaces, capital letters, or any other category names.
-
-SCORING
+SCORING:
 80-100: high_fit
 50-79: medium_fit
 0-49: low_fit
 
-Use needs_review if essential information is insufficient
-to make a reliable qualification decision.
-
+Use needs_review if essential information is insufficient.
 Do not inflate the score.
-If category is needs_review, human_review_required must be true.
 """
 
         response = client.chat.completions.create(
@@ -342,8 +330,7 @@ If category is needs_review, human_review_required must be true.
                     "role": "system",
                     "content": (
                         "You are a careful B2B lead qualification "
-                        "assistant. Return valid JSON only. "
-                        "Use only the permitted category values."
+                        "assistant. Return valid JSON only."
                     ),
                 },
                 {
@@ -368,17 +355,15 @@ If category is needs_review, human_review_required must be true.
 
         result["score"] = score
 
-        # Normalize the AI category before saving it to Neon.
         original_category = result.get("category", "")
 
         normalized_category = normalize_qualification_category(
-            original_category
+            original_category,
+            score,
         )
 
         result["category"] = normalized_category
 
-        # Preserve the original AI category for traceability
-        # if it needed normalization.
         if str(original_category).strip().lower() != normalized_category:
             result["original_ai_category"] = str(original_category)
 
@@ -403,11 +388,15 @@ If category is needs_review, human_review_required must be true.
             result.get("human_review_required", True)
         )
 
-        # Needs Review always requires human review.
         if normalized_category == "needs_review":
             result["human_review_required"] = True
 
-        # Save qualification using the exact database category.
+        # Final validation immediately before database operations.
+        if result["category"] not in ALLOWED_QUALIFICATION_CATEGORIES:
+            raise ValueError(
+                "Invalid qualification category generated."
+            )
+
         save_qualification_result(
             state["lead_id"],
             result,
@@ -417,7 +406,7 @@ If category is needs_review, human_review_required must be true.
         update_lead_qualification(
             state["lead_id"],
             score,
-            normalized_category,
+            result["category"],
         )
 
         create_workflow_event(
@@ -465,9 +454,7 @@ def owner_assignment_agent(state: LeadWorkflowState):
             state["lead_id"],
             "agent_assignment_unavailable",
             message,
-            details={
-                "assignment_success": False,
-            },
+            details={"assignment_success": False},
         )
 
         return {
@@ -531,7 +518,6 @@ def email_draft_agent(state: LeadWorkflowState):
 
     try:
         client = get_groq_client()
-
         qualification = state.get("qualification") or {}
 
         owner_name = (
@@ -562,20 +548,11 @@ Reasoning: {qualification.get('reasoning', 'Not available')}
 Recommended next action:
 {qualification.get('recommended_next_action', 'Review the lead.')}
 
-EMAIL PURPOSE
-Initial personalized follow-up after receiving an inquiry.
+Create a concise professional email of 100-180 words.
+Do not invent facts, prices, promises, sender names, or meetings.
+Include a polite next step.
 
-TONE
-Professional and friendly.
-
-RULES
-1. Do not invent company facts, services, prices, or promises.
-2. Do not claim that a meeting or call has already happened.
-3. Do not invent a sender's name or job title.
-4. Keep the email concise, usually 100-180 words.
-5. Include a polite and clear next step.
-6. Use only the supplied lead information.
-7. Return only this format:
+Return only:
 
 SUBJECT: [subject]
 
@@ -697,35 +674,12 @@ def route_qualification(state):
 def build_lead_workflow():
     graph = StateGraph(LeadWorkflowState)
 
-    graph.add_node(
-        "intake_validation",
-        intake_validation_agent,
-    )
-
-    graph.add_node(
-        "duplicate_detection",
-        duplicate_detection_agent,
-    )
-
-    graph.add_node(
-        "lead_creation",
-        lead_creation_agent,
-    )
-
-    graph.add_node(
-        "qualification",
-        qualification_agent,
-    )
-
-    graph.add_node(
-        "owner_assignment",
-        owner_assignment_agent,
-    )
-
-    graph.add_node(
-        "email_draft",
-        email_draft_agent,
-    )
+    graph.add_node("intake_validation", intake_validation_agent)
+    graph.add_node("duplicate_detection", duplicate_detection_agent)
+    graph.add_node("lead_creation", lead_creation_agent)
+    graph.add_node("qualification", qualification_agent)
+    graph.add_node("owner_assignment", owner_assignment_agent)
+    graph.add_node("email_draft", email_draft_agent)
 
     graph.set_entry_point("intake_validation")
 
@@ -765,15 +719,8 @@ def build_lead_workflow():
         },
     )
 
-    graph.add_edge(
-        "owner_assignment",
-        "email_draft",
-    )
-
-    graph.add_edge(
-        "email_draft",
-        END,
-    )
+    graph.add_edge("owner_assignment", "email_draft")
+    graph.add_edge("email_draft", END)
 
     return graph.compile()
 
@@ -785,10 +732,6 @@ def build_lead_workflow():
 def run_lead_workflow(lead_data, allow_duplicate=False):
     """
     Execute the complete LangGraph lead workflow.
-
-    When a possible duplicate is found, the workflow stops before
-    creating a record. The caller may request a second run with
-    allow_duplicate=True after reviewing the matches.
     """
 
     graph = build_lead_workflow()
