@@ -352,32 +352,6 @@ def update_lead_status(lead_id, status):
 
 
 def update_lead_qualification(lead_id, score, category):
-    """
-    Store the AI qualification category separately from lead priority.
-
-    qualification_results.category uses:
-    high_fit, medium_fit, low_fit, needs_review
-
-    leads.priority uses:
-    unassessed, low, medium, high, urgent
-    """
-
-    category_normalized = (
-        _clean(category).lower().replace(" ", "_").replace("-", "_")
-    )
-
-    priority_mapping = {
-        "high_fit": "high",
-        "medium_fit": "medium",
-        "low_fit": "low",
-        "needs_review": "unassessed",
-    }
-
-    lead_priority = priority_mapping.get(
-        category_normalized,
-        "unassessed",
-    )
-
     with _connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -386,8 +360,9 @@ def update_lead_qualification(lead_id, score, category):
                 SET priority = %s, updated_at = NOW()
                 WHERE id = %s;
                 """,
-                (lead_priority, lead_id),
+                (category, lead_id),
             )
+
 
 # ============================================================
 # QUALIFICATION RESULTS
@@ -606,18 +581,12 @@ def get_owner_workloads():
 
 
 def _specialization_match(specialization, lead):
+    """Return True only when a specialization exactly matches the lead industry."""
+    industry = _normal_text(lead.get("industry"))
     specialization = _normal_text(specialization)
 
-    if not specialization or specialization in ("general", "all", "any"):
+    if not industry or not specialization:
         return False
-
-    searchable = " ".join(
-        [
-            _normal_text(lead.get("industry")),
-            _normal_text(lead.get("description")),
-            _normal_text(lead.get("company")),
-        ]
-    )
 
     terms = [
         item.strip()
@@ -625,8 +594,21 @@ def _specialization_match(specialization, lead):
         if item.strip()
     ]
 
-    return any(term in searchable for term in terms)
+    return industry in terms
 
+
+def _is_general_business_specialization(specialization):
+    """Identify owners who can serve as the general fallback."""
+    normalized = _normal_text(specialization)
+    general_labels = {
+        "general business",
+        "general",
+        "all industries",
+        "all",
+        "any",
+        "*",
+    }
+    return normalized in general_labels
 
 
 def assign_lead_automatically(lead_id):
@@ -635,88 +617,73 @@ def assign_lead_automatically(lead_id):
     if not lead:
         return False, "Lead not found.", None
 
+    industry = _clean(lead.get("industry")) or "unspecified industry"
+
     with _connect() as conn:
         with conn.cursor() as cur:
-
-            # Lock available sales-owner rows without GROUP BY.
             cur.execute(
                 """
                 SELECT
-                    id,
-                    full_name,
-                    specialization,
-                    is_available,
-                    active_lead_limit
-                FROM sales_owners
-                WHERE is_available = TRUE
-                ORDER BY id
-                FOR UPDATE;
+                    s.id,
+                    s.full_name,
+                    s.specialization,
+                    s.is_available,
+                    s.active_lead_limit,
+                    COUNT(
+                        CASE
+                            WHEN LOWER(COALESCE(l.status, '')) NOT IN
+                            ('closed', 'won', 'lost', 'disqualified')
+                            THEN 1
+                        END
+                    ) AS active_leads
+                FROM sales_owners s
+                LEFT JOIN leads l ON l.assigned_owner_id = s.id
+                WHERE s.is_available = TRUE
+                GROUP BY s.id
+                FOR UPDATE OF s;
                 """
             )
+            owners = [dict(row) for row in cur.fetchall()]
 
-            locked_owners = cur.fetchall()
-
-            if not locked_owners:
-                return False, "No available sales owners found.", None
-
-            # Calculate each owner's active workload separately.
-            cur.execute(
-                """
-                SELECT
-                    assigned_owner_id,
-                    COUNT(*) AS active_leads
-                FROM leads
-                WHERE assigned_owner_id IS NOT NULL
-                  AND LOWER(COALESCE(status, '')) NOT IN
-                      ('closed', 'won', 'lost', 'disqualified')
-                GROUP BY assigned_owner_id;
-                """
-            )
-
-            workload_rows = cur.fetchall()
-
-            workload = {
-                row["assigned_owner_id"]: int(row["active_leads"])
-                for row in workload_rows
-            }
-
-            owners = []
-
-            for owner in locked_owners:
-                owner_data = dict(owner)
-
-                owner_data["active_leads"] = workload.get(
-                    owner_data["id"], 0
-                )
-
-                owners.append(owner_data)
-
-            # Exclude owners who have reached their capacity.
             eligible = [
                 owner for owner in owners
-                if int(owner["active_leads"])
-                < int(owner["active_lead_limit"])
+                if int(owner["active_leads"]) < int(owner["active_lead_limit"])
             ]
 
             if not eligible:
-                return (
-                    False,
-                    "No available sales owner has remaining capacity.",
-                    None,
-                )
+                return False, "No available sales owner has remaining capacity.", None
 
-            # Prefer owners whose specialization matches the lead.
+            # First preference: an exact match with the lead's industry.
             matching = [
                 owner for owner in eligible
-                if _specialization_match(
-                    owner.get("specialization"),
-                    lead,
-                )
+                if _specialization_match(owner.get("specialization"), lead)
             ]
 
-            candidates = matching if matching else eligible
+            if matching:
+                candidates = matching
+                assignment_reason = "exact_industry_match"
+            else:
+                # Second preference: a General Business owner only.
+                general_business_owners = [
+                    owner for owner in eligible
+                    if _is_general_business_specialization(
+                        owner.get("specialization")
+                    )
+                ]
 
-            # Select the owner with the lowest capacity utilization.
+                if not general_business_owners:
+                    return (
+                        False,
+                        f"No available owner has an exact match for '{industry}' "
+                        "or a General Business specialization. Lead remains "
+                        "unassigned for manual assignment.",
+                        None,
+                    )
+
+                candidates = general_business_owners
+                assignment_reason = "general_business_fallback"
+
+            # Balance workload among owners within the selected preference group.
             candidates.sort(
                 key=lambda owner: (
                     int(owner["active_leads"]) / max(
@@ -728,28 +695,20 @@ def assign_lead_automatically(lead_id):
 
             selected = candidates[0]
 
-            # Assign the lead.
             cur.execute(
                 """
                 UPDATE leads
-                SET assigned_owner_id = %s,
-                    updated_at = NOW()
+                SET assigned_owner_id = %s, updated_at = NOW()
                 WHERE id = %s;
                 """,
                 (selected["id"], lead_id),
             )
 
-            # Record the assignment in workflow history.
             cur.execute(
                 """
                 INSERT INTO workflow_events (
-                    lead_id,
-                    event_type,
-                    event_status,
-                    message,
-                    details,
-                    actor,
-                    created_at
+                    lead_id, event_type, event_status,
+                    message, details, actor, created_at
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, NOW());
                 """,
@@ -762,15 +721,23 @@ def assign_lead_automatically(lead_id):
                         "owner_id": selected["id"],
                         "owner_name": selected["full_name"],
                         "specialization": selected["specialization"],
-                        "active_leads": selected["active_leads"],
-                        "active_lead_limit": selected["active_lead_limit"],
+                        "lead_industry": industry,
+                        "assignment_reason": assignment_reason,
                     }),
                     "LeadFlow AI",
                 ),
             )
 
-    return True, f"Assigned to {selected['full_name']}.", selected
+    if assignment_reason == "exact_industry_match":
+        message = (
+            f"Assigned to {selected['full_name']} using an exact industry match."
+        )
+    else:
+        message = (
+            f"Assigned to {selected['full_name']} using the General Business fallback."
+        )
 
+    return True, message, selected
 
 
 def assign_lead_owner(lead_id, owner_id):
@@ -897,11 +864,7 @@ def save_email_draft(
 ):
     """
     Create a new draft, or update an existing draft.
-
-    New and edited drafts use the database-approved status:
-    pending_review.
-
-    Saving an edited draft resets its approval information.
+    Saving content resets the status to draft.
     """
 
     recipient_email = _clean(recipient_email)
@@ -927,7 +890,7 @@ def save_email_draft(
                         recipient_email = %s,
                         subject = %s,
                         body = %s,
-                        draft_status = 'pending_review',
+                        draft_status = 'draft',
                         approved_by = NULL,
                         approved_at = NULL,
                         updated_at = NOW()
@@ -939,9 +902,7 @@ def save_email_draft(
                 result = cur.fetchone()
 
                 if not result:
-                    raise ValueError(
-                        "The selected email draft could not be found."
-                    )
+                    raise ValueError("The selected email draft could not be found.")
 
                 saved_id = result["id"]
                 event_type = "email_draft_updated"
@@ -959,9 +920,7 @@ def save_email_draft(
                         created_at,
                         updated_at
                     )
-                    VALUES (
-                        %s, %s, %s, %s, 'pending_review', NOW(), NOW()
-                    )
+                    VALUES (%s, %s, %s, %s, 'draft', NOW(), NOW())
                     RETURNING id;
                     """,
                     (lead_id, recipient_email, subject, body),
@@ -992,7 +951,6 @@ def save_email_draft(
                         "email_draft_id": saved_id,
                         "recipient_email": recipient_email,
                         "subject": subject,
-                        "draft_status": "pending_review",
                     }),
                     "LeadFlow AI",
                 ),
