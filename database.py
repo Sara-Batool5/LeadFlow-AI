@@ -621,6 +621,8 @@ def assign_lead_automatically(lead_id):
 
     with _connect() as conn:
         with conn.cursor() as cur:
+            # Read available owners and calculate workload. Avoid row-locking
+            # clauses so this query remains compatible with the hosted database.
             cur.execute(
                 """
                 SELECT
@@ -640,7 +642,7 @@ def assign_lead_automatically(lead_id):
                 LEFT JOIN leads l ON l.assigned_owner_id = s.id
                 WHERE s.is_available = TRUE
                 GROUP BY s.id
-                FOR UPDATE OF s;
+                ORDER BY s.id;
                 """
             )
             owners = [dict(row) for row in cur.fetchall()]
@@ -760,8 +762,7 @@ def assign_lead_owner(lead_id, owner_id):
                 FROM sales_owners s
                 LEFT JOIN leads l ON l.assigned_owner_id = s.id
                 WHERE s.id = %s
-                GROUP BY s.id
-                FOR UPDATE OF s;
+                GROUP BY s.id;
                 """,
                 (owner_id,),
             )
