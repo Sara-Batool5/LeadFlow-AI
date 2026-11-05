@@ -1250,7 +1250,9 @@ elif page == "Assignment & Follow-up":
             assigned_count = 0
             not_assigned = []
 
-            with st.spinner("Assigning leads based on specialization and workload..."):
+            with st.spinner(
+                "Assigning leads based on specialization and workload..."
+            ):
                 for lead in unassigned_leads:
                     success, message, selected = assign_lead_automatically(
                         lead["id"]
@@ -1259,26 +1261,71 @@ elif page == "Assignment & Follow-up":
                     if success:
                         assigned_count += 1
                     else:
-                        not_assigned.append(
-                            f"{lead.get('lead_reference')}: {message}"
-                        )
+                        not_assigned.append({
+                            "reference": lead.get("lead_reference", "Unknown"),
+                            "contact": lead.get("contact_name", "Unknown"),
+                            "company": lead.get("company", "Not provided"),
+                            "industry": lead.get("industry", "Not specified"),
+                            "reason": message or "No assignment reason provided."
+                        })
 
-            st.success(f"{assigned_count} lead(s) assigned.")
-
-            if not_assigned:
-                st.warning(
-                    "Some leads remain unassigned because no eligible owner "
-                    "was available."
-                )
-                for message in not_assigned:
-                    st.write(f"• {message}")
+            st.session_state["assignment_run_result"] = {
+                "assigned_count": assigned_count,
+                "not_assigned": not_assigned
+            }
 
             st.rerun()
 
     elif not owners:
-        st.info("Add at least one sales owner before assigning leads.")
-    else:
+        st.warning(
+            "No sales owners have been added. "
+            "Automatic assignment cannot proceed."
+        )
+        st.write(
+            "**Reason:** There are no sales owners available in the system."
+        )
+
+    elif not unassigned_leads:
         st.info("There are no unassigned leads.")
+
+    # Display assignment results after the page refreshes.
+    assignment_result = st.session_state.get("assignment_run_result")
+
+    if assignment_result:
+        assigned_count = assignment_result["assigned_count"]
+        not_assigned = assignment_result["not_assigned"]
+
+        if assigned_count > 0:
+            st.success(
+                f"{assigned_count} lead(s) assigned successfully."
+            )
+
+        if not_assigned:
+            if assigned_count == 0:
+                st.error(
+                    "No leads could be assigned to a sales owner."
+                )
+            else:
+                st.warning(
+                    f"{len(not_assigned)} lead(s) could not be assigned."
+                )
+
+            st.markdown("### Unassigned Leads — Reasons")
+
+            for item in not_assigned:
+                with st.expander(
+                    f"{item['reference']} — {item['company']}"
+                ):
+                    st.write(f"**Contact:** {item['contact']}")
+                    st.write(f"**Industry:** {item['industry']}")
+                    st.write(f"**Reason:** {item['reason']}")
+
+            st.info(
+                "Review the reasons above. You may need to add a suitable "
+                "sales owner, update an owner's specialization, make an "
+                "owner available, or increase their capacity. You can also "
+                "use Manual Assignment."
+            )
 
     # --------------------------------------------------------
     # MANUAL ASSIGNMENT
