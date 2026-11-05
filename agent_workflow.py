@@ -55,6 +55,14 @@ ALLOWED_QUALIFICATION_CATEGORIES = {
     "needs_review",
 }
 
+ALLOWED_PRIORITIES = {
+    "unassessed",
+    "low",
+    "medium",
+    "high",
+    "urgent",
+}
+
 
 def get_secret(name, default=None):
     try:
@@ -87,13 +95,16 @@ def get_groq_model():
 
 def clean_json_response(content):
     content = (content or "").strip()
+
     content = re.sub(
         r"^```(?:json)?\s*",
         "",
         content,
         flags=re.IGNORECASE,
     )
+
     content = re.sub(r"\s*```$", "", content)
+
     return content.strip()
 
 
@@ -149,6 +160,141 @@ def normalize_qualification_category(category, score=None):
     return result
 
 
+def normalize_lead_priority(priority):
+    """
+    Convert qualification labels into valid lead priority values.
+    """
+
+    original = str(priority or "unassessed").strip().lower()
+
+    mapping = {
+        "high_fit": "high",
+        "medium_fit": "medium",
+        "low_fit": "low",
+        "needs_review": "unassessed",
+    }
+
+    normalized = mapping.get(original, original)
+
+    if normalized not in ALLOWED_PRIORITIES:
+        normalized = "unassessed"
+
+    return normalized
+
+
+def parse_email_response(output):
+    """
+    Extract an email subject and body from different AI response formats.
+    """
+
+    output = (output or "").strip()
+
+    output = re.sub(
+        r"^```(?:text|markdown|email)?\s*",
+        "",
+        output,
+        flags=re.IGNORECASE,
+    )
+
+    output = re.sub(
+        r"\s*```$",
+        "",
+        output,
+    ).strip()
+
+    if not output:
+        raise ValueError(
+            "The AI returned an empty email response."
+        )
+
+    # Extract subject.
+    subject_match = re.search(
+        r"^\s*(?:SUBJECT(?:\s+LINE)?|EMAIL SUBJECT)\s*:\s*(.+?)\s*$",
+        output,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+
+    subject = (
+        subject_match.group(1).strip()
+        if subject_match
+        else ""
+    )
+
+    # Extract body.
+    body_match = re.search(
+        r"^\s*(?:BODY|EMAIL BODY)\s*:\s*(.*)$",
+        output,
+        flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+
+    body = (
+        body_match.group(1).strip()
+        if body_match
+        else ""
+    )
+
+    # Alternative format: Markdown Subject and Body headings.
+    if not subject:
+        heading_subject = re.search(
+            r"^\s*#{1,3}\s*(?:SUBJECT|SUBJECT LINE)\s*:?\s*(.+?)\s*$",
+            output,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+
+        if heading_subject:
+            subject = heading_subject.group(1).strip()
+
+    if not body:
+        heading_body = re.search(
+            r"^\s*#{1,3}\s*(?:BODY|EMAIL BODY)\s*:?\s*(.*)$",
+            output,
+            flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+        )
+
+        if heading_body:
+            body = heading_body.group(1).strip()
+
+    # Fallback: extract content after a subject line.
+    if not subject and not body:
+        lines = output.splitlines()
+
+        if len(lines) >= 2:
+            subject = lines[0].strip()
+            body = "\n".join(lines[1:]).strip()
+
+    subject = re.sub(
+        r"^#+\s*",
+        "",
+        subject,
+    ).strip()
+
+    body = re.sub(
+        r"^#+\s*",
+        "",
+        body,
+    ).strip()
+
+    body = re.sub(
+        r"^(?:BODY|EMAIL BODY)\s*:\s*",
+        "",
+        body,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    if not subject or not body:
+        raise ValueError(
+            "The AI did not return a complete email draft. "
+            "Please retry email draft generation."
+        )
+
+    if len(subject) > 250:
+        raise ValueError(
+            "The generated email subject is unexpectedly long."
+        )
+
+    return subject, body
+
+
 # ============================================================
 # AGENT 1 — INTAKE VALIDATION
 # ============================================================
@@ -199,33 +345,10 @@ def intake_validation_agent(state: LeadWorkflowState):
         lead.get("consent_to_contact", False)
     )
 
-    # Ensure the lead's priority is always database-compatible.
-    allowed_priorities = {
-        "unassessed",
-        "low",
-        "medium",
-        "high",
-        "urgent",
-    }
-
-    original_priority = str(
-        lead.get("priority") or "unassessed"
-    ).strip().lower()
-
-    priority_mapping = {
-        "high_fit": "high",
-        "medium_fit": "medium",
-        "low_fit": "low",
-        "needs_review": "unassessed",
-    }
-
-    lead["priority"] = priority_mapping.get(
-        original_priority,
-        original_priority,
+    # Ensure priority is valid before lead creation.
+    lead["priority"] = normalize_lead_priority(
+        lead.get("priority")
     )
-
-    if lead["priority"] not in allowed_priorities:
-        lead["priority"] = "unassessed"
 
     return {
         "lead_data": lead,
@@ -233,12 +356,14 @@ def intake_validation_agent(state: LeadWorkflowState):
         "route": "continue",
     }
 
+
 # ============================================================
 # AGENT 2 — DUPLICATE DETECTION
 # ============================================================
 
 def duplicate_detection_agent(state: LeadWorkflowState):
     lead_data = state["lead_data"]
+
     matches = find_potential_duplicates(lead_data)
 
     if matches and not state.get("allow_duplicate", False):
@@ -419,7 +544,6 @@ Do not inflate the score.
         if normalized_category == "needs_review":
             result["human_review_required"] = True
 
-        # Final validation immediately before database operations.
         if result["category"] not in ALLOWED_QUALIFICATION_CATEGORIES:
             raise ValueError(
                 "Invalid qualification category generated."
@@ -546,6 +670,7 @@ def email_draft_agent(state: LeadWorkflowState):
 
     try:
         client = get_groq_client()
+
         qualification = state.get("qualification") or {}
 
         owner_name = (
@@ -576,16 +701,22 @@ Reasoning: {qualification.get('reasoning', 'Not available')}
 Recommended next action:
 {qualification.get('recommended_next_action', 'Review the lead.')}
 
-Create a concise professional email of 100-180 words.
+Write a concise, professional, personalized email of approximately
+100-180 words.
+
 Do not invent facts, prices, promises, sender names, or meetings.
 Include a polite next step.
+Do not claim that the company has already reviewed or approved anything.
 
-Return only:
+STRICT OUTPUT FORMAT:
 
-SUBJECT: [subject]
+SUBJECT: Write the email subject here
 
 BODY:
-[email body]
+Write the complete email body here.
+
+Do not add Markdown headings, code fences, explanations,
+or any text outside this exact format.
 """
 
         response = client.chat.completions.create(
@@ -594,8 +725,10 @@ BODY:
                 {
                     "role": "system",
                     "content": (
-                        "Write accurate, personalized, professional "
-                        "B2B sales emails."
+                        "You write accurate, personalized, professional "
+                        "B2B sales emails. Always return both a subject "
+                        "and a complete body using the exact requested "
+                        "format. Never omit either field."
                     ),
                 },
                 {
@@ -603,42 +736,15 @@ BODY:
                     "content": prompt,
                 },
             ],
-            temperature=0.4,
-            max_tokens=900,
+            temperature=0.3,
+            max_tokens=1000,
         )
 
         output = (
             response.choices[0].message.content or ""
         ).strip()
 
-        subject_match = re.search(
-            r"SUBJECT:\s*(.*?)(?:\n|$)",
-            output,
-            flags=re.IGNORECASE,
-        )
-
-        body_match = re.search(
-            r"BODY:\s*(.*)$",
-            output,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-
-        subject = (
-            subject_match.group(1).strip()
-            if subject_match
-            else "Follow-up regarding your inquiry"
-        )
-
-        body = (
-            body_match.group(1).strip()
-            if body_match
-            else output
-        )
-
-        if not subject or not body:
-            raise ValueError(
-                "The AI did not return a complete email draft."
-            )
+        subject, body = parse_email_response(output)
 
         draft_id = save_email_draft(
             state["lead_id"],
@@ -670,7 +776,9 @@ BODY:
     except Exception as exc:
         return {
             "stage": "completed_email_warning",
-            "email_warning": str(exc),
+            "email_warning": (
+                f"Email draft generation failed: {exc}"
+            ),
             "route": "complete",
         }
 
