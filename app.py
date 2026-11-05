@@ -833,7 +833,7 @@ elif page == "Lead Intake":
                 "Lead source",
                 ["website_form", "LinkedIn", "Referral", "Email", "Event", "Other"],
             )
-             budget = st.selectbox(
+            budget = st.selectbox(
                 "Budget range",
                 [
                     "Not specified",
