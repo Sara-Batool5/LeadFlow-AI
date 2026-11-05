@@ -123,7 +123,7 @@ st.markdown(
 
     /* Sidebar branding */
     .sidebar-brand {
-        font-size: 1.45rem;
+        font-size: 1.6rem;
         font-weight: 800;
         color: #ffffff;
         margin-bottom: 2px;
@@ -143,7 +143,7 @@ st.markdown(
         align-items: center;
         width: 100%;
         box-sizing: border-box;
-        background: #2563eb;
+        background: #29204c;
         color: #ffffff !important;
         font-size: 0.75rem;
         font-weight: 800;
@@ -169,8 +169,8 @@ st.markdown(
         box-sizing: border-box;
         padding: 11px 12px !important;
         margin: 0 !important;
-        background: #2563eb !important;
-        border: 1px solid #2563eb !important;
+        background: #29204c !important;
+        border: 1px solid #29204c !important;
         border-radius: 8px !important;
         box-shadow: none !important;
         color: #ffffff !important;
@@ -193,8 +193,8 @@ st.markdown(
     }
 
     [data-testid="stSidebar"] .stButton > button:hover {
-        background: #1d4ed8 !important;
-        border-color: #1d4ed8 !important;
+        background: #352963 !important;
+        border-color: #352963 !important;
         color: #ffffff !important;
     }
 
