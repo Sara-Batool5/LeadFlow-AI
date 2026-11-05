@@ -352,25 +352,6 @@ def update_lead_status(lead_id, status):
 
 
 def update_lead_qualification(lead_id, score, category):
-    """Update the lead priority using a valid leads.priority value.
-
-    The detailed qualification category (high_fit, medium_fit, low_fit,
-    needs_review) is stored separately in qualification_results.category.
-    The leads.priority column accepts only unassessed, low, medium, high,
-    or urgent.
-    """
-
-    category_value = str(category or "").strip().lower()
-
-    category_to_priority = {
-        "high_fit": "high",
-        "medium_fit": "medium",
-        "low_fit": "low",
-        "needs_review": "unassessed",
-    }
-
-    priority = category_to_priority.get(category_value, "unassessed")
-
     with _connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -379,7 +360,7 @@ def update_lead_qualification(lead_id, score, category):
                 SET priority = %s, updated_at = NOW()
                 WHERE id = %s;
                 """,
-                (priority, lead_id),
+                (category, lead_id),
             )
 
 
@@ -640,8 +621,21 @@ def assign_lead_automatically(lead_id):
 
     with _connect() as conn:
         with conn.cursor() as cur:
-            # Read available owners and calculate workload. Avoid row-locking
-            # clauses so this query remains compatible with the hosted database.
+            # Lock available owner rows first. PostgreSQL does not allow
+            # FOR UPDATE on an aggregate query that uses GROUP BY.
+            # Taking these locks separately also serializes automatic
+            # assignments so concurrent runs cannot overfill an owner.
+            cur.execute(
+                """
+                SELECT id
+                FROM sales_owners
+                WHERE is_available = TRUE
+                ORDER BY id
+                FOR UPDATE;
+                """
+            )
+
+            # Calculate each owner's active workload after acquiring locks.
             cur.execute(
                 """
                 SELECT
@@ -781,7 +775,8 @@ def assign_lead_owner(lead_id, owner_id):
                 FROM sales_owners s
                 LEFT JOIN leads l ON l.assigned_owner_id = s.id
                 WHERE s.id = %s
-                GROUP BY s.id;
+                GROUP BY s.id
+                FOR UPDATE OF s;
                 """,
                 (owner_id,),
             )
@@ -884,7 +879,7 @@ def save_email_draft(
 ):
     """
     Create a new draft, or update an existing draft.
-    Saving content resets the status to draft.
+    Saving content resets the status to pending_review.
     """
 
     recipient_email = _clean(recipient_email)
@@ -910,7 +905,7 @@ def save_email_draft(
                         recipient_email = %s,
                         subject = %s,
                         body = %s,
-                        draft_status = 'draft',
+                        draft_status = 'pending_review',
                         approved_by = NULL,
                         approved_at = NULL,
                         updated_at = NOW()
@@ -940,7 +935,7 @@ def save_email_draft(
                         created_at,
                         updated_at
                     )
-                    VALUES (%s, %s, %s, %s, 'draft', NOW(), NOW())
+                    VALUES (%s, %s, %s, %s, 'pending_review', NOW(), NOW())
                     RETURNING id;
                     """,
                     (lead_id, recipient_email, subject, body),
