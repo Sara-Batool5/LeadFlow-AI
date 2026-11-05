@@ -141,6 +141,23 @@ def _lead_reference(lead):
     )
 
 
+def _normalize_lead_priority(value):
+    """Return a value accepted by the leads.priority database constraint."""
+    priority_value = _clean(value).lower()
+
+    category_to_priority = {
+        "high_fit": "high",
+        "medium_fit": "medium",
+        "low_fit": "low",
+        "needs_review": "unassessed",
+    }
+
+    if priority_value in {"unassessed", "low", "medium", "high", "urgent"}:
+        return priority_value
+
+    return category_to_priority.get(priority_value, "unassessed")
+
+
 # ============================================================
 # LEADS
 # ============================================================
@@ -227,7 +244,7 @@ def create_lead(lead):
         _clean(_lead_value(lead, "budget", "budget_range")),
         _clean(lead.get("timeline")),
         _clean(lead.get("status")) or "new",
-        _clean(lead.get("priority")) or "unassessed",
+        _normalize_lead_priority(lead.get("priority")),
         bool(lead.get("consent_to_contact", False)),
     )
 
@@ -352,6 +369,16 @@ def update_lead_status(lead_id, status):
 
 
 def update_lead_qualification(lead_id, score, category):
+    """Update the lead priority using a valid leads.priority value.
+
+    The detailed qualification category (high_fit, medium_fit, low_fit,
+    needs_review) is stored separately in qualification_results.category.
+    The leads.priority column accepts only unassessed, low, medium, high,
+    or urgent.
+    """
+
+    priority = _normalize_lead_priority(category)
+
     with _connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -360,7 +387,7 @@ def update_lead_qualification(lead_id, score, category):
                 SET priority = %s, updated_at = NOW()
                 WHERE id = %s;
                 """,
-                (category, lead_id),
+                (priority, lead_id),
             )
 
 
@@ -621,21 +648,8 @@ def assign_lead_automatically(lead_id):
 
     with _connect() as conn:
         with conn.cursor() as cur:
-            # Lock available owner rows first. PostgreSQL does not allow
-            # FOR UPDATE on an aggregate query that uses GROUP BY.
-            # Taking these locks separately also serializes automatic
-            # assignments so concurrent runs cannot overfill an owner.
-            cur.execute(
-                """
-                SELECT id
-                FROM sales_owners
-                WHERE is_available = TRUE
-                ORDER BY id
-                FOR UPDATE;
-                """
-            )
-
-            # Calculate each owner's active workload after acquiring locks.
+            # Read available owners and calculate workload. Avoid row-locking
+            # clauses so this query remains compatible with the hosted database.
             cur.execute(
                 """
                 SELECT
@@ -775,8 +789,7 @@ def assign_lead_owner(lead_id, owner_id):
                 FROM sales_owners s
                 LEFT JOIN leads l ON l.assigned_owner_id = s.id
                 WHERE s.id = %s
-                GROUP BY s.id
-                FOR UPDATE OF s;
+                GROUP BY s.id;
                 """,
                 (owner_id,),
             )
