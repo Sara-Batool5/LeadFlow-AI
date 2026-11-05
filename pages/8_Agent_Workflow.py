@@ -321,7 +321,14 @@ with st.form("langgraph_lead_form"):
                 "$5,000-$10,000",
                 "$10,000-$25,000",
                 "$25,000+",
+                "Custom",
             ],
+        )
+
+        budget_custom = st.text_input(
+            "Custom budget (optional)",
+            placeholder="Enter a budget range if you selected Custom",
+            help="This value is used only when Budget range is set to Custom.",
         )
 
         timeline = st.selectbox(
@@ -333,7 +340,14 @@ with st.form("langgraph_lead_form"):
                 "1-3 months",
                 "3-6 months",
                 "More than 6 months",
+                "Custom",
             ],
+        )
+
+        timeline_custom = st.text_input(
+            "Custom expected timeline (optional)",
+            placeholder="Enter a timeline if you selected Custom",
+            help="This value is used only when Expected timeline is set to Custom.",
         )
 
     description = st.text_area(
@@ -360,6 +374,22 @@ with st.form("langgraph_lead_form"):
 # ============================================================
 
 if submitted:
+    budget_value = (
+        budget_custom.strip()
+        if budget == "Custom"
+        else None
+        if budget == "Not specified"
+        else budget
+    )
+
+    timeline_value = (
+        timeline_custom.strip()
+        if timeline == "Custom"
+        else None
+        if timeline == "Not specified"
+        else timeline
+    )
+
     lead_data = {
         "contact_name": contact_name.strip(),
         "email": email.strip(),
@@ -374,16 +404,8 @@ if submitted:
         ),
         "country": country.strip(),
         "source": source,
-        "budget": (
-            None
-            if budget == "Not specified"
-            else budget
-        ),
-        "timeline": (
-            None
-            if timeline == "Not specified"
-            else timeline
-        ),
+        "budget": budget_value,
+        "timeline": timeline_value,
         "description": description.strip() or "Not provided",
         "consent_to_contact": consent,
     }
@@ -406,6 +428,16 @@ if submitted:
     elif "@" not in email or "." not in email.split("@")[-1]:
         st.error(
             "Please enter a valid email address."
+        )
+
+    elif budget == "Custom" and not budget_custom.strip():
+        st.error(
+            "Please enter a custom budget range."
+        )
+
+    elif timeline == "Custom" and not timeline_custom.strip():
+        st.error(
+            "Please enter a custom expected timeline."
         )
 
     else:
