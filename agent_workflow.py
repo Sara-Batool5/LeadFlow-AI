@@ -188,6 +188,7 @@ def intake_validation_agent(state: LeadWorkflowState):
         }
 
     lead["contact_name"] = contact_name
+
     lead["description"] = (
         lead.get("description")
         or lead.get("need_description")
@@ -198,12 +199,39 @@ def intake_validation_agent(state: LeadWorkflowState):
         lead.get("consent_to_contact", False)
     )
 
+    # Ensure the lead's priority is always database-compatible.
+    allowed_priorities = {
+        "unassessed",
+        "low",
+        "medium",
+        "high",
+        "urgent",
+    }
+
+    original_priority = str(
+        lead.get("priority") or "unassessed"
+    ).strip().lower()
+
+    priority_mapping = {
+        "high_fit": "high",
+        "medium_fit": "medium",
+        "low_fit": "low",
+        "needs_review": "unassessed",
+    }
+
+    lead["priority"] = priority_mapping.get(
+        original_priority,
+        original_priority,
+    )
+
+    if lead["priority"] not in allowed_priorities:
+        lead["priority"] = "unassessed"
+
     return {
         "lead_data": lead,
         "stage": "intake_validated",
         "route": "continue",
     }
-
 
 # ============================================================
 # AGENT 2 — DUPLICATE DETECTION
