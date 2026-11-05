@@ -352,6 +352,25 @@ def update_lead_status(lead_id, status):
 
 
 def update_lead_qualification(lead_id, score, category):
+    """Update the lead priority using a valid leads.priority value.
+
+    The detailed qualification category (high_fit, medium_fit, low_fit,
+    needs_review) is stored separately in qualification_results.category.
+    The leads.priority column accepts only unassessed, low, medium, high,
+    or urgent.
+    """
+
+    category_value = str(category or "").strip().lower()
+
+    category_to_priority = {
+        "high_fit": "high",
+        "medium_fit": "medium",
+        "low_fit": "low",
+        "needs_review": "unassessed",
+    }
+
+    priority = category_to_priority.get(category_value, "unassessed")
+
     with _connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -360,7 +379,7 @@ def update_lead_qualification(lead_id, score, category):
                 SET priority = %s, updated_at = NOW()
                 WHERE id = %s;
                 """,
-                (category, lead_id),
+                (priority, lead_id),
             )
 
 
