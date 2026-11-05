@@ -333,11 +333,71 @@ def render_lead_details(lead):
 # AI LEAD QUALIFICATION
 # ============================================================
 
+def normalize_qualification_category(category, score=None):
+    """
+    Convert AI-generated category labels into exact database values.
+    """
+    
+    original = str(category or "").strip().lower()
+    normalized = re.sub(r"[\s\-]+", "_", original)
+    normalized = re.sub(r"[^a-z_]", "", normalized)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+
+    aliases = {
+        "high": "high_fit",
+        "high_fit": "high_fit",
+        "highfit": "high_fit",
+        "high_potential": "high_fit",
+
+        "medium": "medium_fit",
+        "medium_fit": "medium_fit",
+        "mediumfit": "medium_fit",
+        "medium_potential": "medium_fit",
+
+        "low": "low_fit",
+        "low_fit": "low_fit",
+        "lowfit": "low_fit",
+        "low_potential": "low_fit",
+
+        "needs_review": "needs_review",
+        "needsreview": "needs_review",
+        "need_review": "needs_review",
+        "review": "needs_review",
+        "manual_review": "needs_review",
+    }
+
+    result = aliases.get(normalized)
+
+    if result is None:
+        if score is not None and score >= 80:
+            result = "high_fit"
+        elif score is not None and score >= 50:
+            result = "medium_fit"
+        elif score is not None:
+            result = "low_fit"
+        else:
+            result = "needs_review"
+
+    allowed = {
+        "high_fit",
+        "medium_fit",
+        "low_fit",
+        "needs_review",
+    }
+
+    if result not in allowed:
+        result = "needs_review"
+
+    return result
+
+
 def qualify_lead(lead):
     client = get_groq_client()
 
     if not client:
-        raise ValueError("GROQ_API_KEY is missing from Streamlit secrets.")
+        raise ValueError(
+            "GROQ_API_KEY is missing from Streamlit secrets."
+        )
 
     prompt = f"""
 You are an experienced B2B sales qualification analyst.
@@ -358,22 +418,38 @@ Timeline: {lead.get('timeline')}
 Business need: {lead.get('description')}
 
 Return valid JSON only, using this exact structure:
+
 {{
   "score": 0,
-  "category": "High | Medium | Low | Needs Review",
+  "category": "needs_review",
   "reasoning": "Short explanation",
   "missing_information": ["item 1", "item 2"],
   "recommended_next_action": "Specific next action",
   "human_review_required": true
 }}
 
-Scoring guidance:
-- 80-100: High potential
-- 50-79: Medium potential
-- 0-49: Low potential
-- Use Needs Review when essential information is insufficient.
-- Set human_review_required to true if important information is missing
-  or the assessment is uncertain.
+IMPORTANT:
+The category MUST be exactly one of these four values:
+
+- high_fit
+- medium_fit
+- low_fit
+- needs_review
+
+Never return High, Medium, Low, or Needs Review.
+Never use spaces or capital letters in the category.
+
+SCORING:
+- 80-100: high_fit
+- 50-79: medium_fit
+- 0-49: low_fit
+
+Use needs_review when essential information is insufficient
+to make a reliable qualification decision.
+
+Do not inflate the score.
+Set human_review_required to true when important information
+is missing or the assessment is uncertain.
 """
 
     response = client.chat.completions.create(
@@ -381,24 +457,91 @@ Scoring guidance:
         messages=[
             {
                 "role": "system",
-                "content": "You are a careful B2B lead qualification assistant. Return valid JSON only.",
+                "content": (
+                    "You are a careful B2B lead qualification assistant. "
+                    "Return valid JSON only. The category must be one of "
+                    "high_fit, medium_fit, low_fit, needs_review."
+                ),
             },
-            {"role": "user", "content": prompt},
+            {
+                "role": "user",
+                "content": prompt,
+            },
         ],
         temperature=0.2,
         max_tokens=900,
     )
 
-    content = response.choices[0].message.content.strip()
-    content = re.sub(r"^```(?:json)?\s*", "", content)
+    content = response.choices[0].message.content or ""
+
+    content = re.sub(
+        r"^```(?:json)?\s*",
+        "",
+        content.strip(),
+        flags=re.IGNORECASE,
+    )
+
     content = re.sub(r"\s*```$", "", content)
 
     result = json.loads(content)
 
-    score = max(0, min(100, int(result.get("score", 0))))
+    score = max(
+        0,
+        min(100, int(result.get("score", 0))),
+    )
+
     result["score"] = score
 
+    original_category = result.get("category", "")
+
+    # Normalize before returning the result to the main application.
+    result["category"] = normalize_qualification_category(
+        original_category,
+        score,
+    )
+
+    if str(original_category).strip().lower() != result["category"]:
+        result["original_ai_category"] = str(original_category)
+
+    missing = result.get("missing_information", [])
+
+    if not isinstance(missing, list):
+        missing = [str(missing)]
+
+    result["missing_information"] = missing
+
+    result.setdefault(
+        "reasoning",
+        "No reasoning was returned.",
+    )
+
+    result.setdefault(
+        "recommended_next_action",
+        "Review the lead manually.",
+    )
+
+    result["human_review_required"] = bool(
+        result.get("human_review_required", True)
+    )
+
+    if result["category"] == "needs_review":
+        result["human_review_required"] = True
+
+    # Final safeguard: never return an invalid database category.
+    allowed_categories = {
+        "high_fit",
+        "medium_fit",
+        "low_fit",
+        "needs_review",
+    }
+
+    if result["category"] not in allowed_categories:
+        raise ValueError(
+            "Qualification returned an invalid database category."
+        )
+
     return result
+
 
 
 # ============================================================
