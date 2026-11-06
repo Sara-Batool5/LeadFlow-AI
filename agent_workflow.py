@@ -38,6 +38,13 @@ class LeadWorkflowState(TypedDict, total=False):
     draft_id: int
     email_subject: str
     email_body: str
+
+    # Phase 11 — AI Decision Agent
+    ai_decision: dict
+    decision_category: str
+    decision_reasoning: str
+    decision_next_action: str
+
     stage: str
     route: str
     error: str
@@ -61,6 +68,14 @@ ALLOWED_PRIORITIES = {
     "medium",
     "high",
     "urgent",
+}
+
+# Phase 11.1: Only these decision categories are accepted.
+ALLOWED_DECISION_CATEGORIES = {
+    "prioritize_sales",
+    "request_information",
+    "human_review",
+    "hold_low_fit",
 }
 
 
@@ -207,7 +222,6 @@ def parse_email_response(output):
             "The AI returned an empty email response."
         )
 
-    # Extract subject.
     subject_match = re.search(
         r"^\s*(?:SUBJECT(?:\s+LINE)?|EMAIL SUBJECT)\s*:\s*(.+?)\s*$",
         output,
@@ -220,7 +234,6 @@ def parse_email_response(output):
         else ""
     )
 
-    # Extract body.
     body_match = re.search(
         r"^\s*(?:BODY|EMAIL BODY)\s*:\s*(.*)$",
         output,
@@ -233,7 +246,6 @@ def parse_email_response(output):
         else ""
     )
 
-    # Alternative format: Markdown Subject and Body headings.
     if not subject:
         heading_subject = re.search(
             r"^\s*#{1,3}\s*(?:SUBJECT|SUBJECT LINE)\s*:?\s*(.+?)\s*$",
@@ -254,7 +266,6 @@ def parse_email_response(output):
         if heading_body:
             body = heading_body.group(1).strip()
 
-    # Fallback: extract content after a subject line.
     if not subject and not body:
         lines = output.splitlines()
 
@@ -345,7 +356,6 @@ def intake_validation_agent(state: LeadWorkflowState):
         lead.get("consent_to_contact", False)
     )
 
-    # Ensure priority is valid before lead creation.
     lead["priority"] = normalize_lead_priority(
         lead.get("priority")
     )
@@ -584,7 +594,251 @@ Do not inflate the score.
 
 
 # ============================================================
-# AGENT 5 — INTELLIGENT SALES OWNER ASSIGNMENT
+# AGENT 5 — AI DECISION AGENT (PHASE 11.1)
+# ============================================================
+
+def ai_decision_agent(state: LeadWorkflowState):
+    """
+    Evaluate the qualification results and recommend the next action.
+
+    Phase 11.1 only records the decision.
+    Decision-based workflow routing is added in Phase 11.2.
+    """
+
+    try:
+        lead = state.get("lead") or {}
+        qualification = state.get("qualification") or {}
+
+        if not qualification:
+            raise ValueError(
+                "Qualification results are unavailable for decision-making."
+            )
+
+        score = qualification.get("score", 0)
+        category = qualification.get(
+            "category",
+            "needs_review",
+        )
+
+        missing_information = qualification.get(
+            "missing_information",
+            [],
+        )
+
+        if not isinstance(missing_information, list):
+            missing_information = [str(missing_information)]
+
+        human_review_required = bool(
+            qualification.get("human_review_required", True)
+        )
+
+        client = get_groq_client()
+
+        prompt = f"""
+You are the AI Decision Agent for LeadFlow AI,
+a B2B lead-management and sales workflow system.
+
+Your responsibility is to recommend the safest and most appropriate
+next action for a lead after AI qualification.
+
+Use ONLY the supplied lead and qualification information.
+Do not invent facts, company details, budget, intent, or requirements.
+
+LEAD INFORMATION
+Contact: {lead.get('contact_name', 'Not provided')}
+Company: {lead.get('company', 'Not provided')}
+Job title: {lead.get('job_title', 'Not provided')}
+Industry: {lead.get('industry', 'Not provided')}
+Company size: {lead.get('company_size', 'Not provided')}
+Country: {lead.get('country', 'Not provided')}
+Budget: {lead.get('budget', 'Not provided')}
+Timeline: {lead.get('timeline', 'Not provided')}
+Business need: {lead.get('description', 'Not provided')}
+
+QUALIFICATION RESULTS
+Score: {score}
+Category: {category}
+Reasoning: {qualification.get('reasoning', 'Not provided')}
+Missing information: {json.dumps(missing_information)}
+Qualification recommended action:
+{qualification.get('recommended_next_action', 'Not provided')}
+Human review required: {human_review_required}
+
+CHOOSE EXACTLY ONE DECISION CATEGORY:
+
+1. prioritize_sales
+Use when the lead appears sufficiently qualified and suitable
+for sales follow-up.
+
+2. request_information
+Use when important information is missing and should be collected
+before making a confident sales decision.
+
+3. human_review
+Use when the assessment is uncertain, conflicting, or explicitly
+requires human review.
+
+4. hold_low_fit
+Use when the qualification indicates a low-fit lead that should
+not be prioritized for immediate sales follow-up.
+
+DECISION RULES
+- If human review is required, choose human_review.
+- If qualification category is needs_review, choose human_review.
+- If essential information is missing, choose request_information,
+  unless human review is required.
+- If qualification category is low_fit, choose hold_low_fit,
+  unless human review is required.
+- Only choose prioritize_sales when the supplied information
+  supports that decision.
+- Do not change the qualification score or category.
+- Do not assign a sales owner.
+- Do not send or approve emails.
+- Do not claim that information has been requested or that a lead
+  has been contacted. You are only recommending an action.
+
+Return valid JSON only, using this exact structure:
+
+{{
+    "decision": "human_review",
+    "reasoning": "Explain why this decision was selected.",
+    "recommended_next_action": "Describe the next recommended step.",
+    "human_review_required": true
+}}
+"""
+
+        response = client.chat.completions.create(
+            model=get_groq_model(),
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a cautious B2B sales decision agent. "
+                        "Return valid JSON only. Select exactly one "
+                        "allowed decision category. Never invent facts "
+                        "or claim that an action has already occurred."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            temperature=0.1,
+            max_tokens=700,
+        )
+
+        content = clean_json_response(
+            response.choices[0].message.content
+        )
+
+        result = json.loads(content)
+
+        decision = str(
+            result.get("decision", "")
+        ).strip().lower()
+
+        # Validate the AI decision.
+        if decision not in ALLOWED_DECISION_CATEGORIES:
+            raise ValueError(
+                "The AI returned an unsupported decision category."
+            )
+
+        reasoning = str(
+            result.get("reasoning") or ""
+        ).strip()
+
+        recommended_next_action = str(
+            result.get("recommended_next_action") or ""
+        ).strip()
+
+        if not reasoning or not recommended_next_action:
+            raise ValueError(
+                "The AI decision is missing its explanation or next action."
+            )
+
+        # Enforce mandatory human review.
+        # The AI cannot override this qualification requirement.
+        if (
+            human_review_required
+            or category == "needs_review"
+        ):
+            decision = "human_review"
+
+            if not reasoning:
+                reasoning = (
+                    "The qualification result requires human review."
+                )
+
+        decision_result = {
+            "decision": decision,
+            "reasoning": reasoning,
+            "recommended_next_action": recommended_next_action,
+            "human_review_required": (
+                decision == "human_review"
+                or bool(result.get("human_review_required", False))
+            ),
+            "qualification_score": score,
+            "qualification_category": category,
+        }
+
+        create_workflow_event(
+            state["lead_id"],
+            "agent_ai_decision_completed",
+            "AI Decision Agent evaluated the qualification results.",
+            details=decision_result,
+        )
+
+        return {
+            "ai_decision": decision_result,
+            "decision_category": decision,
+            "decision_reasoning": reasoning,
+            "decision_next_action": recommended_next_action,
+            "stage": "decision_completed",
+            "route": "continue",
+        }
+
+    except Exception as exc:
+        # Safe fallback: never allow an uncertain decision to be
+        # treated as an automatically prioritized sales lead.
+        fallback_decision = {
+            "decision": "human_review",
+            "reasoning": (
+                "The AI Decision Agent could not complete a reliable "
+                f"assessment. Manual review is required. Details: {exc}"
+            ),
+            "recommended_next_action": (
+                "Review the qualification results and lead information "
+                "manually before proceeding."
+            ),
+            "human_review_required": True,
+            "decision_error": str(exc),
+        }
+
+        try:
+            create_workflow_event(
+                state["lead_id"],
+                "agent_ai_decision_fallback",
+                "AI Decision Agent used the safe human-review fallback.",
+                details=fallback_decision,
+            )
+        except Exception:
+            pass
+
+        return {
+            "ai_decision": fallback_decision,
+            "decision_category": "human_review",
+            "decision_reasoning": fallback_decision["reasoning"],
+            "decision_next_action": fallback_decision[
+                "recommended_next_action"
+            ],
+            "stage": "decision_completed_with_warning",
+            "route": "continue",
+        }
+
+
+# ============================================================
+# AGENT 6 — INTELLIGENT SALES OWNER ASSIGNMENT
 # ============================================================
 
 def owner_assignment_agent(state: LeadWorkflowState):
@@ -630,7 +884,7 @@ def owner_assignment_agent(state: LeadWorkflowState):
 
 
 # ============================================================
-# AGENT 6 — AI FOLLOW-UP EMAIL DRAFT
+# AGENT 7 — AI FOLLOW-UP EMAIL DRAFT
 # ============================================================
 
 def email_draft_agent(state: LeadWorkflowState):
@@ -814,6 +1068,10 @@ def build_lead_workflow():
     graph.add_node("duplicate_detection", duplicate_detection_agent)
     graph.add_node("lead_creation", lead_creation_agent)
     graph.add_node("qualification", qualification_agent)
+
+    # Phase 11.1: New decision agent.
+    graph.add_node("ai_decision", ai_decision_agent)
+
     graph.add_node("owner_assignment", owner_assignment_agent)
     graph.add_node("email_draft", email_draft_agent)
 
@@ -850,10 +1108,15 @@ def build_lead_workflow():
         "qualification",
         route_qualification,
         {
-            "continue": "owner_assignment",
+            "continue": "ai_decision",
             "error": END,
         },
     )
+
+    # Step 11.1: Record the AI decision, then preserve
+    # the existing workflow by continuing to owner assignment.
+    # Conditional decision routing comes in Step 11.2.
+    graph.add_edge("ai_decision", "owner_assignment")
 
     graph.add_edge("owner_assignment", "email_draft")
     graph.add_edge("email_draft", END)
