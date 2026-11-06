@@ -15,7 +15,7 @@ st.markdown(
     Run a coordinated lead-processing workflow using specialized AI agents.
 
     The workflow validates a lead, checks for duplicates, qualifies it,
-    attempts sales-owner assignment, and prepares an email draft for review.
+    makes an AI decision, and routes it to the appropriate next step.
     """
 )
 
@@ -77,7 +77,7 @@ def display_workflow_result(result):
         return
 
     st.success(
-        "The LangGraph workflow has processed the lead."
+        "The lead was created and processed by the workflow."
     )
 
     st.subheader("Workflow Results")
@@ -107,7 +107,10 @@ def display_workflow_result(result):
 
     st.divider()
 
-    # Qualification
+    # --------------------------------------------------------
+    # 1. AI QUALIFICATION
+    # --------------------------------------------------------
+
     st.subheader("1. AI Qualification")
 
     if qualification:
@@ -116,7 +119,7 @@ def display_workflow_result(result):
             qualification.get("reasoning", "Not available.")
         )
 
-        st.markdown("**Recommended next action**")
+        st.markdown("**Qualification recommended next action**")
         st.info(
             qualification.get(
                 "recommended_next_action",
@@ -129,7 +132,7 @@ def display_workflow_result(result):
             [],
         )
 
-        st.markdown("**Missing information**")
+        st.markdown("**Missing information identified during qualification**")
 
         if missing:
             for item in missing:
@@ -149,8 +152,187 @@ def display_workflow_result(result):
 
     st.divider()
 
-    # Assignment
-    st.subheader("2. Sales Owner Assignment")
+    # --------------------------------------------------------
+    # 2. AI DECISION AND ROUTING
+    # --------------------------------------------------------
+
+    st.subheader("2. AI Decision & Workflow Routing")
+
+    decision = result.get("ai_decision") or {}
+
+    decision_category = (
+        result.get("decision_category")
+        or decision.get("decision")
+        or "Not available"
+    )
+
+    decision_reasoning = (
+        result.get("decision_reasoning")
+        or decision.get("reasoning")
+        or "No decision explanation is available."
+    )
+
+    decision_next_action = (
+        result.get("decision_next_action")
+        or decision.get("recommended_next_action")
+        or "Manual review recommended."
+    )
+
+    decision_route = (
+        result.get("decision_route")
+        or decision.get("selected_route")
+        or "Not available"
+    )
+
+    workflow_outcome = (
+        result.get("workflow_outcome")
+        or decision.get("workflow_outcome")
+        or "Not available"
+    )
+
+    decision_labels = {
+        "prioritize_sales": "Prioritize Sales",
+        "request_information": "Request Information",
+        "human_review": "Human Review",
+        "hold_low_fit": "Hold — Low Fit",
+    }
+
+    decision_descriptions = {
+        "prioritize_sales": (
+            "The lead is eligible to continue to sales-owner assignment."
+        ),
+        "request_information": (
+            "The workflow stopped because additional information "
+            "should be collected before sales assignment."
+        ),
+        "human_review": (
+            "The workflow stopped because a person must review "
+            "the lead before further processing."
+        ),
+        "hold_low_fit": (
+            "The workflow stopped because the lead was assessed "
+            "as low fit for immediate sales prioritization."
+        ),
+    }
+
+    col1, col2 = st.columns(2)
+
+    col1.metric(
+        "AI Decision",
+        decision_labels.get(
+            decision_category,
+            decision_category.replace("_", " ").title(),
+        ),
+    )
+
+    col2.metric(
+        "Selected Route",
+        decision_route.replace("_", " ").title(),
+    )
+
+    st.markdown("**Why the AI selected this decision**")
+    st.write(decision_reasoning)
+
+    st.markdown("**Recommended next action**")
+    st.info(decision_next_action)
+
+    if decision_category == "request_information":
+        decision_missing = (
+            decision.get("missing_information")
+            or result.get("missing_information")
+            or qualification.get("missing_information")
+            or []
+        )
+
+        st.markdown("**Information to collect**")
+
+        if decision_missing:
+            for item in decision_missing:
+                st.write(f"• {item}")
+        else:
+            st.write(
+                "The AI recommends collecting additional information. "
+                "Review the decision explanation above for context."
+            )
+
+    st.markdown("**Workflow outcome**")
+    st.write(
+        decision_descriptions.get(
+            decision_category,
+            workflow_outcome.replace("_", " ").capitalize(),
+        )
+    )
+
+    st.caption(
+        f"Recorded workflow outcome: {workflow_outcome}"
+    )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # STOPPED ROUTES
+    # --------------------------------------------------------
+
+    if decision_route == "request_information":
+        st.warning(
+            "Workflow stopped: additional information is needed. "
+            "Sales-owner assignment and email-draft generation "
+            "were not started."
+        )
+
+        st.subheader("3. Final Workflow Status")
+        st.info(
+            "Waiting for the required lead information before "
+            "continuing the sales workflow."
+        )
+
+        return
+
+    if decision_route == "human_review":
+        st.warning(
+            "Workflow stopped: human review is required. "
+            "Sales-owner assignment and email-draft generation "
+            "were not started."
+        )
+
+        st.subheader("3. Final Workflow Status")
+        st.info(
+            "The lead requires manual review before the workflow "
+            "can proceed."
+        )
+
+        if result.get("email_warning"):
+            st.caption(result["email_warning"])
+
+        return
+
+    if decision_route == "hold_low_fit":
+        st.warning(
+            "Workflow stopped: this lead has been held as low fit. "
+            "Sales-owner assignment and email-draft generation "
+            "were not started."
+        )
+
+        st.subheader("3. Final Workflow Status")
+        st.info(
+            "The lead remains recorded in the database, but it was "
+            "not sent to automatic sales assignment."
+        )
+
+        return
+
+    if decision_route != "prioritize_sales":
+        st.warning(
+            "The workflow did not receive a recognized decision route. "
+            "No automatic sales assignment was started."
+        )
+        return
+
+    # --------------------------------------------------------
+    # 3. SALES OWNER ASSIGNMENT
+    # --------------------------------------------------------
+
+    st.subheader("3. Sales Owner Assignment")
 
     if result.get("assignment_success"):
         owner = result.get("assigned_owner") or {}
@@ -180,8 +362,11 @@ def display_workflow_result(result):
 
     st.divider()
 
-    # Email draft
-    st.subheader("3. Follow-up Email Draft")
+    # --------------------------------------------------------
+    # 4. EMAIL DRAFT
+    # --------------------------------------------------------
+
+    st.subheader("4. Follow-up Email Draft")
 
     if result.get("draft_id"):
         st.success(
@@ -211,7 +396,7 @@ def display_workflow_result(result):
             result["email_warning"]
         )
 
-    elif result.get("stage") == "completed_no_email_consent":
+    elif stage == "completed_no_email_consent":
         st.warning(
             result.get(
                 "email_warning",
@@ -221,25 +406,43 @@ def display_workflow_result(result):
 
     st.divider()
 
-    st.subheader("4. Final Workflow Status")
+    # --------------------------------------------------------
+    # 5. FINAL STATUS
+    # --------------------------------------------------------
 
-    if result.get("stage") == "workflow_completed":
+    st.subheader("5. Final Workflow Status")
+
+    if stage == "workflow_completed":
         st.success("All workflow stages completed.")
 
-    elif result.get("stage") == "completed_no_email_consent":
+    elif stage == "completed_no_email_consent":
         st.success(
-            "Lead qualification and assignment workflow completed. "
-            "Email generation was skipped because consent was not recorded."
+            "Lead qualification, decision-making, and assignment "
+            "completed. Email generation was skipped because "
+            "contact consent was not recorded."
         )
 
-    elif result.get("stage") == "completed_email_warning":
+    elif stage == "completed_email_warning":
         st.warning(
-            "Lead processing completed, but email draft generation needs attention."
+            "Lead processing completed, but email draft generation "
+            "needs attention."
+        )
+
+    elif stage == "owner_assignment_pending":
+        st.warning(
+            "The lead was prioritized, but no eligible sales owner "
+            "was available. It remains in the unassigned queue."
+        )
+
+    elif stage == "owner_assignment_warning":
+        st.warning(
+            "The lead was prioritized, but automatic owner assignment "
+            "encountered an issue."
         )
 
     else:
         st.info(
-            f"Workflow stage: {result.get('stage', 'unknown')}"
+            f"Workflow stage: {stage}"
         )
 
 
