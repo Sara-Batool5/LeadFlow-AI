@@ -1256,6 +1256,15 @@ else:
 
         st.markdown("### Stored Event Details")
 
+        st.write("DEBUG — Event details value:")
+        st.write(selected_event.get("details"))
+        
+        st.write("DEBUG — Event details type:")
+        st.write(type(selected_event.get("details")).__name__)
+        
+        st.write("DEBUG — Parsed details:")
+        st.write(safe_json(selected_event.get("details")))
+        
         show_event_details(selected_event)
 
     else:
