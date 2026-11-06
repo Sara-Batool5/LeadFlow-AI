@@ -1256,29 +1256,7 @@ else:
 
         st.markdown("### Stored Event Details")
 
-        st.write("DEBUG — Event details value:")
-        st.write(selected_event.get("details"))
-        
-        st.write("DEBUG — Event details type:")
-        st.write(type(selected_event.get("details")).__name__)
-        
-        st.write("DEBUG — Parsed details:")
-        st.write(safe_json(selected_event.get("details")))
-        
-        st.write("DEBUG — Formatter test:")
-
-        st.write("TEST 1 — Direct Streamlit output")
-
-        st.subheader("AI Qualification Result")
-        st.write("Score:", selected_event["details"].get("score"))
-        st.write("Category:", selected_event["details"].get("category"))
-        st.write("Reasoning:", selected_event["details"].get("reasoning"))
-        
-        st.write("TEST 2 — Calling formatter")
-        
-        show_qualification_details(selected_event["details"])
-        
-        st.write("TEST 3 — Formatter finished")
+        show_event_details(selected_event)
 
     else:
 
