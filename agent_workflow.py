@@ -434,14 +434,20 @@ Budget: {lead.get('budget')}
 Timeline: {lead.get('timeline')}
 Business need: {lead.get('description')}
 
-Return valid JSON only:
+Return valid JSON only, using this exact structure:
 
 {{
-    "score": 65,
-    "category": "medium_fit",
-    "reasoning": "A credible business opportunity with some missing project details.",
-    "missing_information": ["Expected sample count"],
-    "recommended_next_action": "Collect the missing project details.",
+    "score": 85,
+    "category": "high_fit",
+    "reasoning": "A credible, funded business opportunity with a clear need.",
+    "missing_information": [
+        "Preferred technology stack"
+    ],
+    "critical_missing_information": [],
+    "additional_discovery_information": [
+        "Preferred technology stack"
+    ],
+    "recommended_next_action": "Proceed to sales discovery.",
     "human_review_required": false
 }}
 
@@ -456,30 +462,116 @@ SCORING:
 50-79: medium_fit
 0-49: low_fit
 
-QUALIFICATION AND HUMAN REVIEW RULES:
+QUALIFICATION AND ROUTING RULES:
 
-1. Use high_fit or medium_fit when the company, industry,
-   business need, and available information establish a
-   credible potential customer.
+1. HIGH FIT AND MEDIUM FIT:
+Use high_fit or medium_fit when the company, industry,
+business need, and available information establish a credible
+potential customer.
 
-2. Missing project details alone must NOT automatically
-   require human review.
+2. CRITICAL MISSING INFORMATION:
+Use critical_missing_information for missing details that
+prevent the sales team from responsibly proceeding with
+the opportunity.
 
-3. If a credible potential customer has missing information,
-   use high_fit or medium_fit as appropriate, list the missing
-   details, and set human_review_required to false.
-   The Decision Agent will route this lead to request_information.
+Examples:
+- Sample count when the project scope cannot be estimated
+  without it.
+- Sequencing data volume when essential to defining the service.
+- No sufficiently clear project requirement or service scope.
+- Unclear project objective that prevents understanding
+  what the customer actually needs.
 
-4. Use needs_review and set human_review_required to true
-   when the available information is contradictory, unreliable,
-   insufficient to establish a credible business opportunity,
-   or requires an actual human judgment before proceeding.
+3. NON-BLOCKING DISCOVERY INFORMATION:
+Use additional_discovery_information for useful details
+that can be collected during normal sales discovery.
 
-5. Set human_review_required to true only when there is a
-   genuine reason for human intervention independent of
-   ordinary missing project details.
+Examples:
+- Preferred technology stack.
+- Desired project duration and milestones.
+- Preferred report format.
+- Preferred communication frequency.
+- Other technical preferences that do not prevent
+  an initial sales discussion.
 
-6. Do not inflate the qualification score.
+These details MUST NOT automatically stop an otherwise
+qualified lead from proceeding to sales assignment.
+
+4. MISSING INFORMATION:
+The missing_information field must contain the combined
+list of critical and non-blocking missing details.
+
+Do not classify every missing detail as critical.
+
+5. REQUEST INFORMATION:
+For a credible high_fit or medium_fit lead, use
+critical_missing_information when essential project details
+are genuinely required before sales assignment.
+
+Ordinary technical discovery questions alone must not
+trigger this route.
+
+6. HUMAN REVIEW:
+Use needs_review and set human_review_required to true
+when information is contradictory, unreliable, insufficient
+to establish a credible opportunity, or requires genuine
+human judgment.
+
+Do not use human review merely because ordinary project
+details are missing.
+
+7. LOW FIT:
+Use low_fit for leads that do not represent a credible
+potential customer for the offered services.
+
+A low-fit lead must remain low_fit even if it also has
+missing information.
+
+Do not use missing information to turn an obvious low-fit
+lead into a request-information opportunity.
+
+8. DO NOT INFLATE THE SCORE.
+Assess the actual business opportunity, budget, timeline,
+industry relevance, and business need.
+
+IMPORTANT EXAMPLES:
+
+Example A:
+A funded, high-fit genomics project has a clear service
+requirement and immediate timeline, but has not specified
+its preferred technology stack or project milestones.
+
+Expected:
+high_fit
+critical_missing_information: []
+additional_discovery_information: technical preferences
+human_review_required: false
+
+Example B:
+A credible WGS customer has a budget and timeline but
+has not provided sample count or sequencing data volume,
+which are necessary to define the requested project.
+
+Expected:
+high_fit or medium_fit
+critical_missing_information: sample count and data volume
+human_review_required: false
+
+Example C:
+A lead gives contradictory statements about project approval
+and budget authorization.
+
+Expected:
+needs_review
+human_review_required: true
+
+Example D:
+A small retail business has no genomics or bioinformatics
+requirement, no relevant project, and no purchasing plans.
+
+Expected:
+low_fit
+human_review_required: false
 """
 
         response = client.chat.completions.create(
@@ -489,7 +581,9 @@ QUALIFICATION AND HUMAN REVIEW RULES:
                     "role": "system",
                     "content": (
                         "You are a careful B2B lead qualification "
-                        "assistant. Return valid JSON only."
+                        "assistant. Return valid JSON only and "
+                        "distinguish critical missing information "
+                        "from ordinary discovery details."
                     ),
                 },
                 {
@@ -498,7 +592,7 @@ QUALIFICATION AND HUMAN REVIEW RULES:
                 },
             ],
             temperature=0.2,
-            max_tokens=900,
+            max_tokens=1100,
         )
 
         content = clean_json_response(
@@ -506,6 +600,11 @@ QUALIFICATION AND HUMAN REVIEW RULES:
         )
 
         result = json.loads(content)
+
+        if not isinstance(result, dict):
+            raise ValueError(
+                "The AI qualification response was not a JSON object."
+            )
 
         score = max(
             0,
@@ -523,19 +622,78 @@ QUALIFICATION AND HUMAN REVIEW RULES:
 
         result["category"] = normalized_category
 
-        if str(original_category).strip().lower() != normalized_category:
+        if (
+            str(original_category).strip().lower()
+            != normalized_category
+        ):
             result["original_ai_category"] = str(original_category)
 
-        missing = result.get("missing_information", [])
+        # ----------------------------------------------------
+        # NORMALIZE MISSING INFORMATION
+        # ----------------------------------------------------
 
-        if not isinstance(missing, list):
-            missing = [str(missing)]
+        def normalize_information_list(value):
+            if value is None:
+                return []
 
-        result["missing_information"] = [
-            str(item).strip()
-            for item in missing
-            if str(item).strip()
-        ]
+            if not isinstance(value, list):
+                value = [value]
+
+            return [
+                str(item).strip()
+                for item in value
+                if str(item).strip()
+            ]
+
+        original_missing = normalize_information_list(
+            result.get("missing_information", [])
+        )
+
+        critical_missing = normalize_information_list(
+            result.get("critical_missing_information", [])
+        )
+
+        additional_discovery = normalize_information_list(
+            result.get("additional_discovery_information", [])
+        )
+
+        # ----------------------------------------------------
+        # BACKWARD COMPATIBILITY
+        # ----------------------------------------------------
+        # If the AI does not return the new critical-missing
+        # field, conservatively retain its previous missing
+        # information behavior instead of silently allowing
+        # a potentially incomplete lead through.
+
+        if "critical_missing_information" not in result:
+            critical_missing = original_missing
+
+        # Preserve all missing details without duplication.
+        all_missing = list(
+            dict.fromkeys(
+                critical_missing + additional_discovery
+            )
+        )
+
+        for item in original_missing:
+            if item not in all_missing:
+                all_missing.append(item)
+
+        # Decision Agent reads this field.
+        # Only genuinely blocking details should stop sales.
+        result["missing_information"] = critical_missing
+
+        result["critical_missing_information"] = critical_missing
+
+        result["additional_discovery_information"] = (
+            additional_discovery
+        )
+
+        result["all_missing_information"] = all_missing
+
+        # ----------------------------------------------------
+        # NORMALIZE REASONING AND NEXT ACTION
+        # ----------------------------------------------------
 
         result.setdefault(
             "reasoning",
@@ -547,17 +705,41 @@ QUALIFICATION AND HUMAN REVIEW RULES:
             "Review the lead manually.",
         )
 
-        result["human_review_required"] = bool(
-            result.get("human_review_required", True)
+        # ----------------------------------------------------
+        # NORMALIZE HUMAN REVIEW FLAG
+        # ----------------------------------------------------
+
+        human_review_value = result.get(
+            "human_review_required",
+            True,
         )
 
+        if isinstance(human_review_value, str):
+            human_review_value = (
+                human_review_value.strip().lower()
+                in {"true", "yes", "1"}
+            )
+
+        result["human_review_required"] = bool(
+            human_review_value
+        )
+
+        # Human review must remain mandatory for needs_review.
         if normalized_category == "needs_review":
             result["human_review_required"] = True
+
+        # ----------------------------------------------------
+        # VALIDATE QUALIFICATION CATEGORY
+        # ----------------------------------------------------
 
         if result["category"] not in ALLOWED_QUALIFICATION_CATEGORIES:
             raise ValueError(
                 "Invalid qualification category generated."
             )
+
+        # ----------------------------------------------------
+        # SAVE QUALIFICATION RESULT
+        # ----------------------------------------------------
 
         save_qualification_result(
             state["lead_id"],
