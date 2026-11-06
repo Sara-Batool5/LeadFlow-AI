@@ -763,19 +763,6 @@ Return valid JSON only:
                 + recommended_next_action
             )
 
-        elif missing_information:
-            decision = "request_information"
-
-            reasoning = (
-                "The qualification identified missing information. "
-                + reasoning
-            )
-
-            recommended_next_action = (
-                "Collect the missing information before sales assignment: "
-                + "; ".join(missing_information)
-            )
-
         elif category == "low_fit":
             decision = "hold_low_fit"
 
@@ -787,6 +774,19 @@ Return valid JSON only:
             recommended_next_action = (
                 "Keep the lead out of immediate sales prioritization "
                 "and review it later if new information becomes available."
+            )
+
+        elif missing_information:
+            decision = "request_information"
+
+            reasoning = (
+                "The qualification identified missing information. "
+                + reasoning
+            )
+
+            recommended_next_action = (
+                "Collect the missing information before sales assignment: "
+                + "; ".join(missing_information)
             )
 
         elif category not in {"high_fit", "medium_fit"}:
