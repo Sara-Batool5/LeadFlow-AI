@@ -982,7 +982,20 @@ def owner_assignment_agent(state: LeadWorkflowState):
 # AGENT 7 — AI FOLLOW-UP EMAIL DRAFT
 # ============================================================
 
+
 def email_draft_agent(state: LeadWorkflowState):
+    """
+    Generate a follow-up email draft.
+
+    Recovery behavior:
+    1. Try Groq email generation.
+    2. Retry once if the response is empty or incomplete.
+    3. Generate a safe fallback email if both attempts fail.
+    4. Save the draft for human review.
+    
+    This agent never sends emails.
+    """
+
     lead = get_lead_by_id(state["lead_id"])
 
     if not lead:
@@ -1018,8 +1031,6 @@ def email_draft_agent(state: LeadWorkflowState):
         }
 
     try:
-        client = get_groq_client()
-
         qualification = state.get("qualification") or {}
 
         owner_name = (
@@ -1068,32 +1079,110 @@ Do not add Markdown headings, code fences, explanations,
 or any text outside this exact format.
 """
 
-        response = client.chat.completions.create(
-            model=get_groq_model(),
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You write accurate, personalized, professional "
-                        "B2B sales emails. Always return both a subject "
-                        "and a complete body using the exact requested "
-                        "format. Never omit either field."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
-            temperature=0.3,
-            max_tokens=1000,
-        )
+        client = get_groq_client()
 
-        output = (
-            response.choices[0].message.content or ""
-        ).strip()
+        subject = ""
+        body = ""
+        ai_generation_success = False
+        generation_error = ""
 
-        subject, body = parse_email_response(output)
+        # ----------------------------------------------------
+        # ATTEMPT 1 + ONE RETRY
+        # ----------------------------------------------------
+
+        for attempt in range(1, 3):
+            try:
+                response = client.chat.completions.create(
+                    model=get_groq_model(),
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You write accurate, personalized, "
+                                "professional B2B sales emails. "
+                                "Always return both a subject and a "
+                                "complete body using the exact requested "
+                                "format. Never return an empty response."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt,
+                        },
+                    ],
+                    temperature=0.2,
+                    max_tokens=1200,
+                )
+
+                output = (
+                    response.choices[0].message.content or ""
+                ).strip()
+
+                subject, body = parse_email_response(output)
+
+                ai_generation_success = True
+                break
+
+            except Exception as exc:
+                generation_error = str(exc)
+
+                if attempt == 1:
+                    continue
+
+        # ----------------------------------------------------
+        # FALLBACK EMAIL
+        # ----------------------------------------------------
+
+        if not ai_generation_success:
+
+            contact_name = (
+                lead.get("contact_name") or "there"
+            ).strip()
+
+            company_name = (
+                lead.get("company") or "your organization"
+            ).strip()
+
+            business_need = (
+                lead.get("description") or ""
+            ).strip()
+
+            subject = (
+                f"Following up on your enquiry - {company_name}"
+            )
+
+            if business_need:
+                body = f"""Hello {contact_name},
+
+Thank you for your interest in our services and for sharing information about your requirements.
+
+We would welcome the opportunity to understand your needs regarding {business_need[:350]}
+
+Our team would be happy to discuss the relevant services, understand your project requirements, and explore how we may be able to assist.
+
+Would you be available to share any additional details about your project or suggest a convenient time for an initial discussion?
+
+We look forward to hearing from you.
+
+Best regards,
+The {owner_name} Team"""
+            else:
+                body = f"""Hello {contact_name},
+
+Thank you for your interest in our services.
+
+We would welcome the opportunity to learn more about your organization's requirements and understand how our team may be able to assist.
+
+Could you please share some additional details about your project and the services you are looking for?
+
+We look forward to hearing from you.
+
+Best regards,
+The {owner_name} Team"""
+
+        # ----------------------------------------------------
+        # SAVE THE DRAFT
+        # ----------------------------------------------------
 
         draft_id = save_email_draft(
             state["lead_id"],
@@ -1102,27 +1191,81 @@ or any text outside this exact format.
             body,
         )
 
+        if not draft_id:
+            raise ValueError(
+                "The email draft could not be saved to the database."
+            )
+
+        generation_method = (
+            "ai_generated"
+            if ai_generation_success
+            else "fallback_generated"
+        )
+
         create_workflow_event(
             state["lead_id"],
             "agent_email_draft_created",
-            "LangGraph created a follow-up email draft for human review.",
+            (
+                "LangGraph created an email draft for human review."
+            ),
             details={
                 "email_draft_id": draft_id,
                 "subject": subject,
+                "generation_method": generation_method,
+                "ai_generation_success": ai_generation_success,
                 "approval_required": True,
                 "email_sent": False,
             },
         )
 
+        # Record fallback use separately for easier monitoring.
+        if not ai_generation_success:
+            create_workflow_event(
+                state["lead_id"],
+                "agent_email_fallback_used",
+                (
+                    "AI email generation failed after two attempts. "
+                    "A fallback email draft was created and saved "
+                    "for human review."
+                ),
+                details={
+                    "email_draft_id": draft_id,
+                    "generation_error": generation_error,
+                    "generation_method": "fallback_generated",
+                },
+            )
+
         return {
             "draft_id": draft_id,
             "email_subject": subject,
             "email_body": body,
+            "email_generation_method": generation_method,
             "stage": "workflow_completed",
             "route": "complete",
+            "email_warning": (
+                ""
+                if ai_generation_success
+                else (
+                    "Groq did not return a valid email after two "
+                    "attempts. A fallback draft was saved for review."
+                )
+            ),
         }
 
     except Exception as exc:
+        try:
+            create_workflow_event(
+                state["lead_id"],
+                "agent_email_draft_failed",
+                "Email draft generation and recovery failed.",
+                details={
+                    "error": str(exc),
+                    "draft_created": False,
+                },
+            )
+        except Exception:
+            pass
+
         return {
             "stage": "completed_email_warning",
             "email_warning": (
@@ -1131,7 +1274,7 @@ or any text outside this exact format.
             "route": "complete",
         }
 
-
+        
 # ============================================================
 # ROUTING FUNCTIONS
 # ============================================================
