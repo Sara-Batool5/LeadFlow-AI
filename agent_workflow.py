@@ -44,6 +44,9 @@ class LeadWorkflowState(TypedDict, total=False):
     decision_category: str
     decision_reasoning: str
     decision_next_action: str
+    decision_route: str
+    workflow_outcome: str
+    missing_information: list
 
     stage: str
     route: str
@@ -70,7 +73,6 @@ ALLOWED_PRIORITIES = {
     "urgent",
 }
 
-# Phase 11.1: Only these decision categories are accepted.
 ALLOWED_DECISION_CATEGORIES = {
     "prioritize_sales",
     "request_information",
@@ -124,10 +126,6 @@ def clean_json_response(content):
 
 
 def normalize_qualification_category(category, score=None):
-    """
-    Guarantee that only a database-approved category is returned.
-    """
-
     original = str(category or "").strip().lower()
 
     normalized = re.sub(r"[\s\-]+", "_", original)
@@ -139,17 +137,14 @@ def normalize_qualification_category(category, score=None):
         "highfit": "high_fit",
         "high_potential": "high_fit",
         "high_fit": "high_fit",
-
         "medium": "medium_fit",
         "mediumfit": "medium_fit",
         "medium_potential": "medium_fit",
         "medium_fit": "medium_fit",
-
         "low": "low_fit",
         "lowfit": "low_fit",
         "low_potential": "low_fit",
         "low_fit": "low_fit",
-
         "needsreview": "needs_review",
         "need_review": "needs_review",
         "needs_review": "needs_review",
@@ -176,10 +171,6 @@ def normalize_qualification_category(category, score=None):
 
 
 def normalize_lead_priority(priority):
-    """
-    Convert qualification labels into valid lead priority values.
-    """
-
     original = str(priority or "unassessed").strip().lower()
 
     mapping = {
@@ -198,10 +189,6 @@ def normalize_lead_priority(priority):
 
 
 def parse_email_response(output):
-    """
-    Extract an email subject and body from different AI response formats.
-    """
-
     output = (output or "").strip()
 
     output = re.sub(
@@ -211,11 +198,7 @@ def parse_email_response(output):
         flags=re.IGNORECASE,
     )
 
-    output = re.sub(
-        r"\s*```$",
-        "",
-        output,
-    ).strip()
+    output = re.sub(r"\s*```$", "", output).strip()
 
     if not output:
         raise ValueError(
@@ -273,17 +256,8 @@ def parse_email_response(output):
             subject = lines[0].strip()
             body = "\n".join(lines[1:]).strip()
 
-    subject = re.sub(
-        r"^#+\s*",
-        "",
-        subject,
-    ).strip()
-
-    body = re.sub(
-        r"^#+\s*",
-        "",
-        body,
-    ).strip()
+    subject = re.sub(r"^#+\s*", "", subject).strip()
+    body = re.sub(r"^#+\s*", "", body).strip()
 
     body = re.sub(
         r"^(?:BODY|EMAIL BODY)\s*:\s*",
@@ -535,7 +509,11 @@ Do not inflate the score.
         if not isinstance(missing, list):
             missing = [str(missing)]
 
-        result["missing_information"] = missing
+        result["missing_information"] = [
+            str(item).strip()
+            for item in missing
+            if str(item).strip()
+        ]
 
         result.setdefault(
             "reasoning",
@@ -594,31 +572,37 @@ Do not inflate the score.
 
 
 # ============================================================
-# AGENT 5 — AI DECISION AGENT (PHASE 11.1)
+# AGENT 5 — AI DECISION AGENT (PHASE 11.1 + 11.2)
 # ============================================================
 
 def ai_decision_agent(state: LeadWorkflowState):
     """
-    Evaluate the qualification results and recommend the next action.
+    Evaluate qualification results and determine the next workflow route.
 
-    Phase 11.1 only records the decision.
-    Decision-based workflow routing is added in Phase 11.2.
+    Safe routing rules:
+    - Human review takes precedence when explicitly required.
+    - needs_review qualification always goes to human review.
+    - Missing information routes to request_information.
+    - low_fit qualification routes to hold_low_fit.
+    - Only suitable high_fit or medium_fit leads can proceed
+      to sales-owner assignment.
+    - Any decision-agent failure routes to human review.
     """
 
-    try:
-        lead = state.get("lead") or {}
-        qualification = state.get("qualification") or {}
+    lead_id = state.get("lead_id")
+    lead = state.get("lead") or {}
+    qualification = state.get("qualification") or {}
 
+    try:
         if not qualification:
             raise ValueError(
                 "Qualification results are unavailable for decision-making."
             )
 
         score = qualification.get("score", 0)
-        category = qualification.get(
-            "category",
-            "needs_review",
-        )
+        category = str(
+            qualification.get("category", "needs_review")
+        ).strip().lower()
 
         missing_information = qualification.get(
             "missing_information",
@@ -627,6 +611,12 @@ def ai_decision_agent(state: LeadWorkflowState):
 
         if not isinstance(missing_information, list):
             missing_information = [str(missing_information)]
+
+        missing_information = [
+            str(item).strip()
+            for item in missing_information
+            if str(item).strip()
+        ]
 
         human_review_required = bool(
             qualification.get("human_review_required", True)
@@ -638,13 +628,9 @@ def ai_decision_agent(state: LeadWorkflowState):
 You are the AI Decision Agent for LeadFlow AI,
 a B2B lead-management and sales workflow system.
 
-Your responsibility is to recommend the safest and most appropriate
-next action for a lead after AI qualification.
+Recommend exactly one next action using only the supplied data.
 
-Use ONLY the supplied lead and qualification information.
-Do not invent facts, company details, budget, intent, or requirements.
-
-LEAD INFORMATION
+LEAD
 Contact: {lead.get('contact_name', 'Not provided')}
 Company: {lead.get('company', 'Not provided')}
 Job title: {lead.get('job_title', 'Not provided')}
@@ -655,55 +641,37 @@ Budget: {lead.get('budget', 'Not provided')}
 Timeline: {lead.get('timeline', 'Not provided')}
 Business need: {lead.get('description', 'Not provided')}
 
-QUALIFICATION RESULTS
+QUALIFICATION
 Score: {score}
 Category: {category}
 Reasoning: {qualification.get('reasoning', 'Not provided')}
 Missing information: {json.dumps(missing_information)}
-Qualification recommended action:
+Qualification next action:
 {qualification.get('recommended_next_action', 'Not provided')}
 Human review required: {human_review_required}
 
-CHOOSE EXACTLY ONE DECISION CATEGORY:
+Allowed decision values:
+prioritize_sales
+request_information
+human_review
+hold_low_fit
 
-1. prioritize_sales
-Use when the lead appears sufficiently qualified and suitable
-for sales follow-up.
-
-2. request_information
-Use when important information is missing and should be collected
-before making a confident sales decision.
-
-3. human_review
-Use when the assessment is uncertain, conflicting, or explicitly
-requires human review.
-
-4. hold_low_fit
-Use when the qualification indicates a low-fit lead that should
-not be prioritized for immediate sales follow-up.
-
-DECISION RULES
-- If human review is required, choose human_review.
-- If qualification category is needs_review, choose human_review.
-- If essential information is missing, choose request_information,
-  unless human review is required.
-- If qualification category is low_fit, choose hold_low_fit,
-  unless human review is required.
-- Only choose prioritize_sales when the supplied information
-  supports that decision.
+Rules:
+- Choose human_review if human review is required or the category is needs_review.
+- Choose request_information if important information is missing.
+- Choose hold_low_fit if the qualification category is low_fit.
+- Choose prioritize_sales only when the category is high_fit or medium_fit,
+  no essential information is missing, and human review is not required.
 - Do not change the qualification score or category.
-- Do not assign a sales owner.
-- Do not send or approve emails.
-- Do not claim that information has been requested or that a lead
-  has been contacted. You are only recommending an action.
+- Do not claim that an email has been sent or information has been requested.
+- You are recommending an action only.
 
-Return valid JSON only, using this exact structure:
+Return valid JSON only:
 
 {{
-    "decision": "human_review",
-    "reasoning": "Explain why this decision was selected.",
-    "recommended_next_action": "Describe the next recommended step.",
-    "human_review_required": true
+    "decision": "prioritize_sales",
+    "reasoning": "Explain the decision.",
+    "recommended_next_action": "Describe the next step."
 }}
 """
 
@@ -714,9 +682,8 @@ Return valid JSON only, using this exact structure:
                     "role": "system",
                     "content": (
                         "You are a cautious B2B sales decision agent. "
-                        "Return valid JSON only. Select exactly one "
-                        "allowed decision category. Never invent facts "
-                        "or claim that an action has already occurred."
+                        "Return valid JSON only and select one allowed "
+                        "decision category."
                     ),
                 },
                 {
@@ -738,7 +705,6 @@ Return valid JSON only, using this exact structure:
             result.get("decision", "")
         ).strip().lower()
 
-        # Validate the AI decision.
         if decision not in ALLOWED_DECISION_CATEGORIES:
             raise ValueError(
                 "The AI returned an unsupported decision category."
@@ -757,35 +723,140 @@ Return valid JSON only, using this exact structure:
                 "The AI decision is missing its explanation or next action."
             )
 
-        # Enforce mandatory human review.
-        # The AI cannot override this qualification requirement.
-        if (
-            human_review_required
-            or category == "needs_review"
-        ):
+        # ----------------------------------------------------
+        # DETERMINISTIC SAFETY OVERRIDES
+        # ----------------------------------------------------
+
+        if human_review_required or category == "needs_review":
             decision = "human_review"
 
-            if not reasoning:
-                reasoning = (
-                    "The qualification result requires human review."
-                )
+            reasoning = (
+                "Human review is required by the qualification result. "
+                + reasoning
+            )
+
+            recommended_next_action = (
+                "A team member must review the lead and qualification "
+                "before any sales assignment. "
+                + recommended_next_action
+            )
+
+        elif missing_information:
+            decision = "request_information"
+
+            reasoning = (
+                "The qualification identified missing information. "
+                + reasoning
+            )
+
+            recommended_next_action = (
+                "Collect the missing information before sales assignment: "
+                + "; ".join(missing_information)
+            )
+
+        elif category == "low_fit":
+            decision = "hold_low_fit"
+
+            reasoning = (
+                "The qualification category is low_fit. "
+                + reasoning
+            )
+
+            recommended_next_action = (
+                "Keep the lead out of immediate sales prioritization "
+                "and review it later if new information becomes available."
+            )
+
+        elif category not in {"high_fit", "medium_fit"}:
+            decision = "human_review"
+
+            reasoning = (
+                "The qualification category is not eligible for automatic "
+                "sales prioritization. " + reasoning
+            )
+
+            recommended_next_action = (
+                "Review the qualification and lead details manually."
+            )
+
+        elif decision == "prioritize_sales":
+            # This is the only decision that can continue automatically.
+            pass
+
+        elif decision == "request_information":
+            # The AI can request additional information even if the
+            # qualification did not list a specific missing field.
+            pass
+
+        elif decision == "hold_low_fit":
+            # Do not let the AI hold a medium/high-fit lead as low-fit.
+            decision = "human_review"
+            reasoning = (
+                "The AI proposed a low-fit hold, but the qualification "
+                "category is not low_fit. Manual review is required. "
+                + reasoning
+            )
+            recommended_next_action = (
+                "Review the mismatch between the AI decision and "
+                "qualification category."
+            )
+
+        elif decision == "human_review":
+            pass
+
+        # ----------------------------------------------------
+        # DETERMINE WORKFLOW ROUTE
+        # ----------------------------------------------------
+
+        if decision == "prioritize_sales":
+            decision_route = "prioritize_sales"
+            workflow_outcome = "continuing_to_owner_assignment"
+            final_stage = "decision_prioritize_sales"
+
+        elif decision == "request_information":
+            decision_route = "request_information"
+            workflow_outcome = "stopped_pending_information"
+            final_stage = "workflow_stopped_for_information"
+
+        elif decision == "hold_low_fit":
+            decision_route = "hold_low_fit"
+            workflow_outcome = "held_low_fit"
+            final_stage = "workflow_held_low_fit"
+
+        else:
+            decision = "human_review"
+            decision_route = "human_review"
+            workflow_outcome = "stopped_for_human_review"
+            final_stage = "workflow_stopped_for_human_review"
 
         decision_result = {
             "decision": decision,
             "reasoning": reasoning,
             "recommended_next_action": recommended_next_action,
-            "human_review_required": (
-                decision == "human_review"
-                or bool(result.get("human_review_required", False))
-            ),
+            "human_review_required": decision == "human_review",
             "qualification_score": score,
             "qualification_category": category,
+            "missing_information": missing_information,
+            "selected_route": decision_route,
+            "workflow_outcome": workflow_outcome,
         }
 
+        # Record the AI's final decision.
         create_workflow_event(
-            state["lead_id"],
+            lead_id,
             "agent_ai_decision_completed",
             "AI Decision Agent evaluated the qualification results.",
+            details=decision_result,
+        )
+
+        # Record the actual route selected by the workflow.
+        create_workflow_event(
+            lead_id,
+            "agent_decision_route_selected",
+            (
+                f"Decision route selected: {decision_route}. "
+                f"Workflow outcome: {workflow_outcome}."
+            ),
             details=decision_result,
         )
 
@@ -794,32 +865,46 @@ Return valid JSON only, using this exact structure:
             "decision_category": decision,
             "decision_reasoning": reasoning,
             "decision_next_action": recommended_next_action,
-            "stage": "decision_completed",
-            "route": "continue",
+            "decision_route": decision_route,
+            "workflow_outcome": workflow_outcome,
+            "missing_information": missing_information,
+            "stage": final_stage,
+            "route": decision_route,
         }
 
     except Exception as exc:
-        # Safe fallback: never allow an uncertain decision to be
-        # treated as an automatically prioritized sales lead.
+        # A failed or uncertain decision must never continue
+        # automatically to owner assignment.
         fallback_decision = {
             "decision": "human_review",
             "reasoning": (
                 "The AI Decision Agent could not complete a reliable "
-                f"assessment. Manual review is required. Details: {exc}"
+                "assessment. Manual review is required."
             ),
             "recommended_next_action": (
                 "Review the qualification results and lead information "
                 "manually before proceeding."
             ),
             "human_review_required": True,
+            "qualification_score": qualification.get("score"),
+            "qualification_category": qualification.get("category"),
+            "selected_route": "human_review",
+            "workflow_outcome": "stopped_for_human_review",
             "decision_error": str(exc),
         }
 
         try:
             create_workflow_event(
-                state["lead_id"],
+                lead_id,
                 "agent_ai_decision_fallback",
                 "AI Decision Agent used the safe human-review fallback.",
+                details=fallback_decision,
+            )
+
+            create_workflow_event(
+                lead_id,
+                "agent_decision_route_selected",
+                "Decision route selected: human_review after decision-agent fallback.",
                 details=fallback_decision,
             )
         except Exception:
@@ -832,8 +917,18 @@ Return valid JSON only, using this exact structure:
             "decision_next_action": fallback_decision[
                 "recommended_next_action"
             ],
-            "stage": "decision_completed_with_warning",
-            "route": "continue",
+            "decision_route": "human_review",
+            "workflow_outcome": "stopped_for_human_review",
+            "missing_information": qualification.get(
+                "missing_information",
+                [],
+            ),
+            "stage": "workflow_stopped_for_human_review",
+            "route": "human_review",
+            "email_warning": (
+                "The decision agent encountered an issue. "
+                "The workflow safely stopped for human review."
+            ),
         }
 
 
@@ -1057,6 +1152,28 @@ def route_qualification(state):
     return state.get("route", "continue")
 
 
+def route_decision(state):
+    """
+    Only prioritize_sales may continue to owner assignment.
+    All other decisions terminate the workflow.
+    """
+
+    decision_route = state.get("decision_route")
+
+    if decision_route == "prioritize_sales":
+        return "prioritize_sales"
+
+    if decision_route in {
+        "request_information",
+        "human_review",
+        "hold_low_fit",
+    }:
+        return decision_route
+
+    # Unknown or missing route is treated as human review.
+    return "human_review"
+
+
 # ============================================================
 # LANGGRAPH CONSTRUCTION
 # ============================================================
@@ -1068,10 +1185,7 @@ def build_lead_workflow():
     graph.add_node("duplicate_detection", duplicate_detection_agent)
     graph.add_node("lead_creation", lead_creation_agent)
     graph.add_node("qualification", qualification_agent)
-
-    # Phase 11.1: New decision agent.
     graph.add_node("ai_decision", ai_decision_agent)
-
     graph.add_node("owner_assignment", owner_assignment_agent)
     graph.add_node("email_draft", email_draft_agent)
 
@@ -1113,10 +1227,17 @@ def build_lead_workflow():
         },
     )
 
-    # Step 11.1: Record the AI decision, then preserve
-    # the existing workflow by continuing to owner assignment.
-    # Conditional decision routing comes in Step 11.2.
-    graph.add_edge("ai_decision", "owner_assignment")
+    # Phase 11.2: Decision-based conditional routing.
+    graph.add_conditional_edges(
+        "ai_decision",
+        route_decision,
+        {
+            "prioritize_sales": "owner_assignment",
+            "request_information": END,
+            "human_review": END,
+            "hold_low_fit": END,
+        },
+    )
 
     graph.add_edge("owner_assignment", "email_draft")
     graph.add_edge("email_draft", END)
