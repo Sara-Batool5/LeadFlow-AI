@@ -437,12 +437,12 @@ Business need: {lead.get('description')}
 Return valid JSON only:
 
 {{
-    "score": 0,
-    "category": "needs_review",
-    "reasoning": "Short explanation",
-    "missing_information": [],
-    "recommended_next_action": "Specific next action",
-    "human_review_required": true
+    "score": 65,
+    "category": "medium_fit",
+    "reasoning": "A credible business opportunity with some missing project details.",
+    "missing_information": ["Expected sample count"],
+    "recommended_next_action": "Collect the missing project details.",
+    "human_review_required": false
 }}
 
 CATEGORY VALUES:
@@ -456,8 +456,30 @@ SCORING:
 50-79: medium_fit
 0-49: low_fit
 
-Use needs_review if essential information is insufficient.
-Do not inflate the score.
+QUALIFICATION AND HUMAN REVIEW RULES:
+
+1. Use high_fit or medium_fit when the company, industry,
+   business need, and available information establish a
+   credible potential customer.
+
+2. Missing project details alone must NOT automatically
+   require human review.
+
+3. If a credible potential customer has missing information,
+   use high_fit or medium_fit as appropriate, list the missing
+   details, and set human_review_required to false.
+   The Decision Agent will route this lead to request_information.
+
+4. Use needs_review and set human_review_required to true
+   when the available information is contradictory, unreliable,
+   insufficient to establish a credible business opportunity,
+   or requires an actual human judgment before proceeding.
+
+5. Set human_review_required to true only when there is a
+   genuine reason for human intervention independent of
+   ordinary missing project details.
+
+6. Do not inflate the qualification score.
 """
 
         response = client.chat.completions.create(
