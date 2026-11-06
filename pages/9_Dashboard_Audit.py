@@ -1265,7 +1265,11 @@ else:
         st.write("DEBUG — Parsed details:")
         st.write(safe_json(selected_event.get("details")))
         
-        show_event_details(selected_event)
+        st.write("DEBUG — Formatter test:")
+
+        show_qualification_details(
+            safe_json(selected_event.get("details"))
+        )
 
     else:
 
