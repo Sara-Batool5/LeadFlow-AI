@@ -327,6 +327,15 @@ for lead_id, decision_event in latest_decisions.items():
 
     route = selected_route or decision
 
+    # A lead leaves its active queue as soon as a human action is recorded.
+    # The action events are persisted in workflow_events, so this also
+    # remains effective after the page is refreshed or reopened.
+    if route == "human_review" and lead_id in latest_review_actions:
+        continue
+
+    if route == "request_information" and lead_id in latest_information_actions:
+        continue
+
     lead = get_lead_for_event(decision_event)
 
     qualification_event = latest_qualifications.get(
@@ -414,28 +423,20 @@ st.subheader("Review Center Overview")
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    st.metric(
-        "Human Review Leads",
-        len(human_review_queue),
-    )
+    st.markdown("[**Human Review Leads ↓**](#human-review-queue)")
+    st.metric("Open cases", len(human_review_queue))
 
 with col2:
-    st.metric(
-        "Information Requests",
-        len(information_request_queue),
-    )
+    st.markdown("[**Information Requests ↓**](#information-request-queue)")
+    st.metric("Open cases", len(information_request_queue))
 
 with col3:
-    st.metric(
-        "Pending Email Drafts",
-        len(pending_drafts),
-    )
+    st.markdown("[**Pending Email Drafts ↓**](#pending-email-drafts)")
+    st.metric("Awaiting approval", len(pending_drafts))
 
 with col4:
-    st.metric(
-        "Approved Email Drafts",
-        len(approved_drafts),
-    )
+    st.markdown("[**Approved Email Drafts ↓**](#approved-email-drafts)")
+    st.metric("Approved", len(approved_drafts))
 
 
 st.divider()
@@ -445,7 +446,7 @@ st.divider()
 # HUMAN REVIEW QUEUE
 # ============================================================
 
-st.header("1. Human Review Queue")
+st.header("1. Human Review Queue", anchor="human-review-queue")
 
 st.write(
     "Leads routed to human review by the AI Decision Agent. "
@@ -682,7 +683,7 @@ else:
 
 st.divider()
 
-st.header("2. Information Request Queue")
+st.header("2. Information Request Queue", anchor="information-request-queue")
 
 st.write(
     "These leads were routed to request_information because "
@@ -895,7 +896,7 @@ with col3:
 # PENDING EMAIL DRAFTS
 # ============================================================
 
-st.subheader("Pending Approval Queue")
+st.subheader("Pending Approval Queue", anchor="pending-email-drafts")
 
 if not pending_drafts:
 
@@ -1032,6 +1033,8 @@ else:
 # ============================================================
 # APPROVED EMAIL DRAFTS
 # ============================================================
+
+st.subheader("Approved Email Drafts", anchor="approved-email-drafts")
 
 with st.expander(
     f"View Approved Drafts ({len(approved_drafts)})",
