@@ -699,9 +699,9 @@ with st.sidebar:
     ):
         st.switch_page("pages/9_Dashboard_Audit.py")
 
-    # SECTION 4 — HUMAN REVIEW CENTER
+    # SECTION 4 — HUMAN REVIEW & APPROVAL CENTER
     if st.button(
-        "HUMAN REVIEW CENTER",
+        "HUMAN REVIEW & APPROVAL CENTER",
         key="nav_human_review_center",
         use_container_width=True,
     ):
