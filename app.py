@@ -1761,7 +1761,29 @@ elif page == "Workflow History":
 
     events = get_workflow_events()
 
+    def normalize_event_details(raw_details):
+        """Convert PostgreSQL JSON/JSONB details into displayable data."""
+        if raw_details is None:
+            return {}
+
+        if isinstance(raw_details, (dict, list)):
+            return raw_details
+
+        if isinstance(raw_details, str):
+            raw_details = raw_details.strip()
+
+            if not raw_details:
+                return {}
+
+            try:
+                return json.loads(raw_details)
+            except Exception:
+                return {"information": raw_details}
+
+        return {"information": str(raw_details)}
+
     if events:
+        # Keep the existing activity table unchanged.
         st.dataframe(
             [
                 {
@@ -1778,6 +1800,46 @@ elif page == "Workflow History":
             use_container_width=True,
             hide_index=True,
         )
+
+        st.divider()
+        st.subheader("Event Details")
+        st.caption(
+            "Expand an event to inspect all additional information saved "
+            "with that workflow activity."
+        )
+
+        for index, event in enumerate(events):
+            created_at = event.get("created_at") or "Date unavailable"
+            lead_reference = event.get("lead_reference") or "System event"
+            contact_name = event.get("contact_name") or ""
+            event_name = event.get("event_type") or "Unknown event"
+            event_message = event.get("message") or ""
+
+            expander_title = (
+                f"{created_at} | {lead_reference} | {event_name}"
+            )
+
+            if contact_name:
+                expander_title += f" | {contact_name}"
+
+            with st.expander(expander_title, expanded=False):
+                st.markdown("**Event message**")
+                st.write(event_message or "No event message was recorded.")
+
+                st.markdown("**Additional saved details**")
+                details = normalize_event_details(event.get("details"))
+
+                if details:
+                    st.json(details, expanded=True)
+                else:
+                    st.info(
+                        "No additional details were saved for this event."
+                    )
+
+                st.caption(
+                    f"Event status: {event.get('event_status') or 'Unknown'}"
+                    f" | Actor: {event.get('actor') or 'Unknown'}"
+                )
     else:
         st.info("No workflow events have been recorded yet.")
 
