@@ -17,6 +17,7 @@ from database import (
     create_workflow_event,
     assign_lead_automatically,
     save_email_draft,
+    record_agent_outcome,
 )
 
 
@@ -278,6 +279,67 @@ def parse_email_response(output):
         )
 
     return subject, body
+
+
+# ============================================================
+# PHASE 12.1 — STANDARDIZED OUTCOME RECORDING
+# ============================================================
+
+def record_workflow_outcome_safely(
+    state,
+    outcome,
+    message,
+    additional_details=None,
+):
+    """
+    Record a standardized workflow outcome using the existing
+    workflow_events table.
+
+    An outcome-recording error must not interrupt the main
+    lead workflow.
+    """
+
+    lead_id = state.get("lead_id")
+
+    if not lead_id:
+        return False
+
+    qualification = state.get("qualification") or {}
+    decision = state.get("ai_decision") or {}
+    owner = state.get("assigned_owner") or {}
+
+    details = {
+        "workflow_stage": state.get("stage"),
+        "decision_category": state.get("decision_category"),
+        "decision_route": state.get("decision_route"),
+        "workflow_outcome": state.get("workflow_outcome"),
+        "qualification_score": qualification.get("score"),
+        "qualification_category": qualification.get("category"),
+        "assignment_success": state.get("assignment_success"),
+        "assignment_message": state.get("assignment_message"),
+        "assigned_owner": owner,
+        "draft_id": state.get("draft_id"),
+        "email_sent": False,
+        "approval_required": True,
+        "decision": decision,
+    }
+
+    if additional_details:
+        details.update(additional_details)
+
+    try:
+        record_agent_outcome(
+            lead_id=lead_id,
+            outcome=outcome,
+            details=details,
+            message=message,
+        )
+
+        return True
+
+    except Exception:
+        # Outcome recording must never interrupt the main workflow.
+        return False
 
 
 # ============================================================
@@ -660,15 +722,10 @@ human_review_required: false
         # ----------------------------------------------------
         # BACKWARD COMPATIBILITY
         # ----------------------------------------------------
-        # If the AI does not return the new critical-missing
-        # field, conservatively retain its previous missing
-        # information behavior instead of silently allowing
-        # a potentially incomplete lead through.
 
         if "critical_missing_information" not in result:
             critical_missing = original_missing
 
-        # Preserve all missing details without duplication.
         all_missing = list(
             dict.fromkeys(
                 critical_missing + additional_discovery
@@ -679,8 +736,6 @@ human_review_required: false
             if item not in all_missing:
                 all_missing.append(item)
 
-        # Decision Agent reads this field.
-        # Only genuinely blocking details should stop sales.
         result["missing_information"] = critical_missing
 
         result["critical_missing_information"] = critical_missing
@@ -724,7 +779,6 @@ human_review_required: false
             human_review_value
         )
 
-        # Human review must remain mandatory for needs_review.
         if normalized_category == "needs_review":
             result["human_review_required"] = True
 
@@ -984,16 +1038,12 @@ Return valid JSON only:
             )
 
         elif decision == "prioritize_sales":
-            # This is the only decision that can continue automatically.
             pass
 
         elif decision == "request_information":
-            # The AI can request additional information even if the
-            # qualification did not list a specific missing field.
             pass
 
         elif decision == "hold_low_fit":
-            # Do not let the AI hold a medium/high-fit lead as low-fit.
             decision = "human_review"
             reasoning = (
                 "The AI proposed a low-fit hold, but the qualification "
@@ -1064,6 +1114,74 @@ Return valid JSON only:
             details=decision_result,
         )
 
+        # ----------------------------------------------------
+        # PHASE 12.1 — RECORD TERMINAL DECISION OUTCOMES
+        # ----------------------------------------------------
+
+        if decision_route == "request_information":
+            record_workflow_outcome_safely(
+                {
+                    **state,
+                    "ai_decision": decision_result,
+                    "decision_category": decision,
+                    "decision_route": decision_route,
+                    "workflow_outcome": workflow_outcome,
+                },
+                outcome="stopped_pending_information",
+                message=(
+                    "Workflow outcome recorded: lead requires "
+                    "additional information before sales assignment."
+                ),
+                additional_details={
+                    "missing_information": missing_information,
+                    "recommended_next_action": recommended_next_action,
+                },
+            )
+
+        elif decision_route == "human_review":
+            record_workflow_outcome_safely(
+                {
+                    **state,
+                    "ai_decision": decision_result,
+                    "decision_category": decision,
+                    "decision_route": decision_route,
+                    "workflow_outcome": workflow_outcome,
+                },
+                outcome="stopped_for_human_review",
+                message=(
+                    "Workflow outcome recorded: lead requires "
+                    "human review before sales assignment."
+                ),
+                additional_details={
+                    "human_review_required": True,
+                    "recommended_next_action": recommended_next_action,
+                },
+            )
+
+        elif decision_route == "hold_low_fit":
+            record_workflow_outcome_safely(
+                {
+                    **state,
+                    "ai_decision": decision_result,
+                    "decision_category": decision,
+                    "decision_route": decision_route,
+                    "workflow_outcome": workflow_outcome,
+                },
+                outcome="held_low_fit",
+                message=(
+                    "Workflow outcome recorded: low-fit lead "
+                    "was held out of immediate sales prioritization."
+                ),
+                additional_details={
+                    "human_review_required": False,
+                    "recommended_next_action": recommended_next_action,
+                },
+            )
+
+        # prioritize_sales is intentionally not recorded as a
+        # final outcome here. Its workflow continues through
+        # owner assignment and email draft generation.
+
         return {
             "ai_decision": decision_result,
             "decision_category": decision,
@@ -1079,6 +1197,7 @@ Return valid JSON only:
     except Exception as exc:
         # A failed or uncertain decision must never continue
         # automatically to owner assignment.
+
         fallback_decision = {
             "decision": "human_review",
             "reasoning": (
@@ -1111,6 +1230,31 @@ Return valid JSON only:
                 "Decision route selected: human_review after decision-agent fallback.",
                 details=fallback_decision,
             )
+
+            # ------------------------------------------------
+            # PHASE 12.1 — RECORD FALLBACK OUTCOME
+            # ------------------------------------------------
+
+            record_workflow_outcome_safely(
+                {
+                    **state,
+                    "ai_decision": fallback_decision,
+                    "decision_category": "human_review",
+                    "decision_route": "human_review",
+                    "workflow_outcome": "stopped_for_human_review",
+                },
+                outcome="stopped_for_human_review",
+                message=(
+                    "Workflow outcome recorded: the Decision Agent "
+                    "failed and safely routed the lead to human review."
+                ),
+                additional_details={
+                    "decision_agent_fallback": True,
+                    "decision_error": str(exc),
+                    "human_review_required": True,
+                },
+            )
+
         except Exception:
             pass
 
@@ -1186,7 +1330,6 @@ def owner_assignment_agent(state: LeadWorkflowState):
 # AGENT 7 — AI FOLLOW-UP EMAIL DRAFT
 # ============================================================
 
-
 def email_draft_agent(state: LeadWorkflowState):
     """
     Generate a follow-up email draft.
@@ -1196,13 +1339,59 @@ def email_draft_agent(state: LeadWorkflowState):
     2. Retry once if the response is empty or incomplete.
     3. Generate a safe fallback email if both attempts fail.
     4. Save the draft for human review.
-    
+
     This agent never sends emails.
     """
 
-    lead = get_lead_by_id(state["lead_id"])
+    # --------------------------------------------------------
+    # RETRIEVE LEAD
+    # --------------------------------------------------------
+
+    try:
+        lead = get_lead_by_id(state["lead_id"])
+
+    except Exception as exc:
+        record_workflow_outcome_safely(
+            {
+                **state,
+                "stage": "email_draft_failed",
+            },
+            outcome="sales_workflow_email_draft_failed",
+            message=(
+                "Sales workflow reached the email stage, but "
+                "the lead could not be retrieved for draft generation."
+            ),
+            additional_details={
+                "draft_created": False,
+                "failure_reason": str(exc),
+            },
+        )
+
+        return {
+            "stage": "email_draft_failed",
+            "email_warning": (
+                f"Lead retrieval failed during email generation: {exc}"
+            ),
+            "route": "complete",
+        }
 
     if not lead:
+        record_workflow_outcome_safely(
+            {
+                **state,
+                "stage": "email_draft_failed",
+            },
+            outcome="sales_workflow_email_draft_failed",
+            message=(
+                "Sales workflow reached the email stage, but "
+                "the lead could not be retrieved for draft generation."
+            ),
+            additional_details={
+                "draft_created": False,
+                "failure_reason": "lead_not_found",
+            },
+        )
+
         return {
             "stage": "email_draft_failed",
             "email_warning": (
@@ -1210,6 +1399,10 @@ def email_draft_agent(state: LeadWorkflowState):
             ),
             "route": "complete",
         }
+
+    # --------------------------------------------------------
+    # CONSENT CHECK
+    # --------------------------------------------------------
 
     if not lead.get("consent_to_contact"):
         create_workflow_event(
@@ -1225,6 +1418,23 @@ def email_draft_agent(state: LeadWorkflowState):
             },
         )
 
+        record_workflow_outcome_safely(
+            {
+                **state,
+                "stage": "completed_no_email_consent",
+            },
+            outcome="sales_workflow_completed_without_email_consent",
+            message=(
+                "Sales workflow completed without generating an "
+                "email draft because contact consent was not recorded."
+            ),
+            additional_details={
+                "draft_created": False,
+                "email_skipped": True,
+                "reason": "consent_not_recorded",
+            },
+        )
+
         return {
             "stage": "completed_no_email_consent",
             "email_warning": (
@@ -1233,6 +1443,12 @@ def email_draft_agent(state: LeadWorkflowState):
             ),
             "route": "complete",
         }
+
+    # --------------------------------------------------------
+    # EMAIL GENERATION AND SAVING
+    # --------------------------------------------------------
+
+    draft_id = None
 
     try:
         qualification = state.get("qualification") or {}
@@ -1439,6 +1655,70 @@ The {owner_name} Team"""
                 },
             )
 
+        # ----------------------------------------------------
+        # PHASE 12.1 — FINAL SALES WORKFLOW OUTCOME
+        # ----------------------------------------------------
+
+        if ai_generation_success:
+            final_outcome = (
+                "sales_workflow_completed_ai_email_draft_saved"
+            )
+
+            final_message = (
+                "Sales workflow completed successfully. "
+                "An AI-generated email draft was saved for human review."
+            )
+
+        else:
+            final_outcome = (
+                "sales_workflow_completed_fallback_email_draft_saved"
+            )
+
+            final_message = (
+                "Sales workflow completed with a fallback email draft. "
+                "The draft was saved for human review."
+            )
+
+        # Preserve the distinction between successful email
+        # generation and unsuccessful/pending owner assignment.
+        if not state.get("assignment_success"):
+            if ai_generation_success:
+                final_outcome = (
+                    "sales_workflow_completed_with_assignment_pending"
+                )
+            else:
+                final_outcome = (
+                    "sales_workflow_completed_with_assignment_pending_and_fallback_email"
+                )
+
+            final_message = (
+                "The email draft was saved, but automatic sales-owner "
+                "assignment was unsuccessful or remains pending."
+            )
+
+        record_workflow_outcome_safely(
+            {
+                **state,
+                "draft_id": draft_id,
+                "email_subject": subject,
+                "email_body": body,
+                "stage": "workflow_completed",
+            },
+            outcome=final_outcome,
+            message=final_message,
+            additional_details={
+                "draft_created": True,
+                "email_draft_id": draft_id,
+                "generation_method": generation_method,
+                "ai_generation_success": ai_generation_success,
+                "assignment_success": bool(
+                    state.get("assignment_success")
+                ),
+                "email_sent": False,
+                "approval_required": True,
+            },
+        )
+
         return {
             "draft_id": draft_id,
             "email_subject": subject,
@@ -1464,11 +1744,39 @@ The {owner_name} Team"""
                 "Email draft generation and recovery failed.",
                 details={
                     "error": str(exc),
-                    "draft_created": False,
+                    "draft_created": bool(draft_id),
+                    "email_draft_id": draft_id,
                 },
             )
         except Exception:
             pass
+
+        record_workflow_outcome_safely(
+            {
+                **state,
+                "draft_id": draft_id,
+                "stage": "completed_email_warning",
+            },
+            outcome=(
+                "sales_workflow_email_draft_saved_but_audit_failed"
+                if draft_id
+                else "sales_workflow_email_draft_failed"
+            ),
+            message=(
+                "The email stage encountered an error. "
+                + (
+                    "A draft was saved, but a later email-stage operation failed."
+                    if draft_id
+                    else "No email draft was successfully saved."
+                )
+            ),
+            additional_details={
+                "draft_created": bool(draft_id),
+                "email_draft_id": draft_id,
+                "email_sent": False,
+                "failure_reason": str(exc),
+            },
+        )
 
         return {
             "stage": "completed_email_warning",
@@ -1478,7 +1786,7 @@ The {owner_name} Team"""
             "route": "complete",
         }
 
-        
+
 # ============================================================
 # ROUTING FUNCTIONS
 # ============================================================
