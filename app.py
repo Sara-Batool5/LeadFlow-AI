@@ -1749,6 +1749,7 @@ elif page == "Assignment & Follow-up":
     )
 
 
+
 # ============================================================
 # WORKFLOW HISTORY
 # ============================================================
@@ -1762,7 +1763,7 @@ elif page == "Workflow History":
     events = get_workflow_events()
 
     def normalize_event_details(raw_details):
-        """Convert PostgreSQL JSON/JSONB details into displayable data."""
+        """Convert PostgreSQL JSON/JSONB details into Python data."""
         if raw_details is None:
             return {}
 
@@ -1782,8 +1783,66 @@ elif page == "Workflow History":
 
         return {"information": str(raw_details)}
 
+    def format_detail_label(key):
+        """Convert database field names into readable labels."""
+        return str(key).replace("_", " ").strip().title()
+
+    def render_detail_value(value):
+        """Display nested event details in a readable format."""
+
+        if isinstance(value, dict):
+            for nested_key, nested_value in value.items():
+                st.markdown(f"**{format_detail_label(nested_key)}**")
+                render_detail_value(nested_value)
+
+        elif isinstance(value, list):
+            if not value:
+                st.write("None")
+
+            for item in value:
+                if isinstance(item, (dict, list)):
+                    with st.container(border=True):
+                        render_detail_value(item)
+                else:
+                    st.markdown(f"- {item}")
+
+        elif value is None:
+            st.write("Not provided")
+
+        elif isinstance(value, bool):
+            st.write("Yes" if value else "No")
+
+        else:
+            st.write(value)
+
+    def searchable_event_text(event):
+        """Combine event fields and JSON details for searching."""
+        details = normalize_event_details(event.get("details"))
+
+        searchable_data = {
+            "date": event.get("created_at"),
+            "lead_reference": event.get("lead_reference"),
+            "contact_name": event.get("contact_name"),
+            "event_type": event.get("event_type"),
+            "event_status": event.get("event_status"),
+            "message": event.get("message"),
+            "actor": event.get("actor"),
+            "details": details,
+        }
+
+        return json.dumps(
+            searchable_data,
+            default=str,
+            ensure_ascii=False,
+        ).lower()
+
     if events:
-        # Keep the existing activity table unchanged.
+        # ----------------------------------------------------
+        # MAIN ACTIVITY TABLE
+        # ----------------------------------------------------
+
+        st.subheader("Activity Log")
+
         st.dataframe(
             [
                 {
@@ -1802,46 +1861,146 @@ elif page == "Workflow History":
         )
 
         st.divider()
+
+        # ----------------------------------------------------
+        # EVENT DETAILS AND SEARCH
+        # ----------------------------------------------------
+
         st.subheader("Event Details")
+
         st.caption(
-            "Expand an event to inspect all additional information saved "
-            "with that workflow activity."
+            "Search and inspect the additional information saved "
+            "with individual workflow events."
         )
 
-        for index, event in enumerate(events):
-            created_at = event.get("created_at") or "Date unavailable"
-            lead_reference = event.get("lead_reference") or "System event"
-            contact_name = event.get("contact_name") or ""
-            event_name = event.get("event_type") or "Unknown event"
-            event_message = event.get("message") or ""
+        search_query = st.text_input(
+            "Search Event Details",
+            placeholder=(
+                "Search by lead name, reference, event type, "
+                "review outcome, notes, qualification category..."
+            ),
+            key="workflow_event_details_search",
+        )
 
-            expander_title = (
-                f"{created_at} | {lead_reference} | {event_name}"
-            )
+        filtered_events = events
 
-            if contact_name:
-                expander_title += f" | {contact_name}"
+        if search_query.strip():
+            search_term = search_query.strip().lower()
 
-            with st.expander(expander_title, expanded=False):
-                st.markdown("**Event message**")
-                st.write(event_message or "No event message was recorded.")
+            filtered_events = [
+                event
+                for event in events
+                if search_term in searchable_event_text(event)
+            ]
 
-                st.markdown("**Additional saved details**")
-                details = normalize_event_details(event.get("details"))
+        st.caption(
+            f"Showing {len(filtered_events)} of {len(events)} workflow events."
+        )
 
-                if details:
-                    st.json(details, expanded=True)
-                else:
-                    st.info(
-                        "No additional details were saved for this event."
+        if filtered_events:
+            for index, event in enumerate(filtered_events):
+
+                created_at = (
+                    event.get("created_at") or "Date unavailable"
+                )
+
+                lead_reference = (
+                    event.get("lead_reference") or "System event"
+                )
+
+                contact_name = event.get("contact_name") or ""
+                event_name = (
+                    event.get("event_type") or "Unknown event"
+                )
+
+                event_message = event.get("message") or ""
+
+                expander_title = (
+                    f"{created_at} | {lead_reference} | {event_name}"
+                )
+
+                if contact_name:
+                    expander_title += f" | {contact_name}"
+
+                with st.expander(
+                    expander_title,
+                    expanded=False,
+                ):
+
+                    # Event information
+                    st.markdown("### Event Information")
+
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.markdown("**Lead Reference**")
+                        st.write(lead_reference)
+
+                        st.markdown("**Contact**")
+                        st.write(contact_name or "System event")
+
+                        st.markdown("**Event Type**")
+                        st.write(event_name)
+
+                    with col2:
+                        st.markdown("**Date**")
+                        st.write(created_at)
+
+                        st.markdown("**Status**")
+                        st.write(
+                            event.get("event_status") or "Unknown"
+                        )
+
+                        st.markdown("**Actor**")
+                        st.write(event.get("actor") or "Unknown")
+
+                    st.divider()
+
+                    st.markdown("### Event Message")
+                    st.write(
+                        event_message
+                        or "No event message was recorded."
                     )
 
-                st.caption(
-                    f"Event status: {event.get('event_status') or 'Unknown'}"
-                    f" | Actor: {event.get('actor') or 'Unknown'}"
-                )
+                    st.divider()
+
+                    # Additional saved information
+                    st.markdown("### Additional Saved Details")
+
+                    details = normalize_event_details(
+                        event.get("details")
+                    )
+
+                    if details:
+                        if isinstance(details, dict):
+                            for key, value in details.items():
+                                st.markdown(
+                                    f"**{format_detail_label(key)}**"
+                                )
+                                render_detail_value(value)
+                                st.markdown("---")
+
+                        elif isinstance(details, list):
+                            render_detail_value(details)
+
+                        else:
+                            st.write(details)
+
+                    else:
+                        st.info(
+                            "No additional details were saved "
+                            "for this event."
+                        )
+
+        else:
+            st.info(
+                "No workflow events match your search. "
+                "Try another lead name, event type, or detail value."
+            )
+
     else:
         st.info("No workflow events have been recorded yet.")
+
 
 
 # ============================================================
