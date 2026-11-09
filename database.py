@@ -523,6 +523,48 @@ def get_workflow_events(lead_id=None):
             return [dict(row) for row in cur.fetchall()]
 
 
+def record_agent_outcome(
+    lead_id,
+    outcome,
+    details=None,
+    message=None,
+    actor="LeadFlow AI",
+):
+    """
+    Record a standardized outcome from the autonomous
+    lead workflow using the existing workflow_events table.
+    """
+
+    if not lead_id:
+        raise ValueError(
+            "A valid lead_id is required to record an agent outcome."
+        )
+
+    outcome = str(outcome or "").strip()
+
+    if not outcome:
+        raise ValueError(
+            "An outcome value is required."
+        )
+
+    outcome_details = dict(details or {})
+
+    outcome_details["outcome"] = outcome
+    outcome_details["outcome_recorded"] = True
+
+    return create_workflow_event(
+        lead_id=lead_id,
+        event_type="agent_workflow_outcome_recorded",
+        message=(
+            message
+            or f"Agent workflow outcome recorded: {outcome}."
+        ),
+        event_status="completed",
+        details=outcome_details,
+        actor=actor,
+    )
+
+
 # ============================================================
 # SALES OWNERS AND WORKLOAD
 # ============================================================
