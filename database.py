@@ -565,6 +565,246 @@ def record_agent_outcome(
     )
 
 
+def get_relevant_agent_memories(
+    lead_data,
+    qualification=None,
+    limit=5,
+):
+    """
+    Retrieve relevant historical agent outcomes.
+
+    Relevance is based on:
+    - Matching industry
+    - Matching company size
+    - Matching qualification category
+
+    Only anonymized historical information is returned.
+    """
+
+    if not isinstance(lead_data, dict):
+        lead_data = {}
+
+    if not isinstance(qualification, dict):
+        qualification = {}
+
+    current_industry = _normal_text(
+        lead_data.get("industry")
+    )
+
+    current_company_size = _normal_text(
+        lead_data.get("company_size")
+    )
+
+    current_category = _normal_text(
+        qualification.get("category")
+        or lead_data.get("qualification_category")
+    )
+
+    try:
+        limit = max(1, min(int(limit), 20))
+    except (TypeError, ValueError):
+        limit = 5
+
+    query = """
+        SELECT
+            w.id AS event_id,
+            w.details,
+            w.message,
+            w.created_at,
+
+            l.industry,
+            l.company_size,
+
+            q.score AS qualification_score,
+            q.category AS qualification_category,
+            q.reasoning AS qualification_reasoning,
+            q.missing_information,
+            q.recommended_next_action
+
+        FROM workflow_events w
+
+        INNER JOIN leads l
+            ON l.id = w.lead_id
+
+        LEFT JOIN LATERAL (
+            SELECT
+                qr.score,
+                qr.category,
+                qr.reasoning,
+                qr.missing_information,
+                qr.recommended_next_action
+
+            FROM qualification_results qr
+
+            WHERE qr.lead_id = l.id
+
+            ORDER BY qr.created_at DESC
+
+            LIMIT 1
+        ) q ON TRUE
+
+        WHERE
+            w.event_type = 'agent_workflow_outcome_recorded'
+
+        ORDER BY w.created_at DESC
+
+        LIMIT 500;
+    """
+
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            historical_records = [
+                dict(row) for row in cur.fetchall()
+            ]
+
+    relevant_memories = []
+
+    for record in historical_records:
+
+        historical_industry = _normal_text(
+            record.get("industry")
+        )
+
+        historical_company_size = _normal_text(
+            record.get("company_size")
+        )
+
+        historical_category = _normal_text(
+            record.get("qualification_category")
+        )
+
+        relevance_score = 0
+
+        # Industry is the strongest relevance signal.
+        if (
+            current_industry
+            and historical_industry == current_industry
+        ):
+            relevance_score += 100
+
+        # Company size provides an additional similarity signal.
+        if (
+            current_company_size
+            and historical_company_size == current_company_size
+        ):
+            relevance_score += 20
+
+        # Similar qualification categories are also useful.
+        if (
+            current_category
+            and historical_category == current_category
+        ):
+            relevance_score += 30
+
+        # Ignore historical leads with no meaningful similarity.
+        if relevance_score == 0:
+            continue
+
+        details = record.get("details") or {}
+
+        if isinstance(details, str):
+            try:
+                import json
+                details = json.loads(details)
+            except Exception:
+                details = {}
+
+        if not isinstance(details, dict):
+            details = {}
+
+        missing_information = (
+            record.get("missing_information") or []
+        )
+
+        if isinstance(missing_information, str):
+            try:
+                import json
+                missing_information = json.loads(
+                    missing_information
+                )
+            except Exception:
+                missing_information = [
+                    missing_information
+                ]
+
+        if not isinstance(missing_information, list):
+            missing_information = []
+
+        # Return only information useful for future decisions.
+        memory = {
+            "industry": record.get("industry"),
+            "company_size": record.get("company_size"),
+
+            "qualification_score": (
+                record.get("qualification_score")
+            ),
+
+            "qualification_category": (
+                record.get("qualification_category")
+            ),
+
+            "qualification_reasoning": (
+                record.get("qualification_reasoning")
+            ),
+
+            "missing_information": missing_information,
+
+            "recommended_next_action": (
+                record.get("recommended_next_action")
+            ),
+
+            "outcome": details.get("outcome"),
+
+            "decision": (
+                details.get("decision")
+                or details.get("ai_decision")
+            ),
+
+            "decision_category": (
+                details.get("decision_category")
+            ),
+
+            "decision_route": (
+                details.get("decision_route")
+                or details.get("selected_route")
+            ),
+
+            "assignment_outcome": (
+                details.get("assignment_outcome")
+            ),
+
+            "draft_created": details.get("draft_created"),
+
+            "email_sent": details.get("email_sent", False),
+
+            "generation_method": (
+                details.get("generation_method")
+            ),
+
+            "message": record.get("message"),
+
+            "created_at": record.get("created_at"),
+
+            "relevance_score": relevance_score,
+        }
+
+        relevant_memories.append(memory)
+
+    # Highest relevance first; newest records break ties.
+    relevant_memories.sort(
+        key=lambda item: (
+            item["relevance_score"],
+            item["created_at"] or datetime.min.replace(
+                tzinfo=timezone.utc
+            ),
+        ),
+        reverse=True,
+    )
+
+    return relevant_memories[:limit]
+
+
 # ============================================================
 # SALES OWNERS AND WORKLOAD
 # ============================================================
