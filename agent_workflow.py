@@ -18,6 +18,7 @@ from database import (
     assign_lead_automatically,
     save_email_draft,
     record_agent_outcome,
+    get_relevant_agent_memories,
 )
 
 
@@ -48,6 +49,11 @@ class LeadWorkflowState(TypedDict, total=False):
     decision_route: str
     workflow_outcome: str
     missing_information: list
+
+    # Phase 12.2 — Agent Memory Retrieval
+    agent_memories: list
+    memory_retrieval_status: str
+    memory_retrieval_count: int
 
     stage: str
     route: str
@@ -830,7 +836,100 @@ human_review_required: false
 
 
 # ============================================================
-# AGENT 5 — AI DECISION AGENT (PHASE 11.1 + 11.2)
+# AGENT 5 — HISTORICAL MEMORY RETRIEVAL (PHASE 12.2)
+# ============================================================
+
+def memory_retrieval_agent(state: LeadWorkflowState):
+    """
+    Retrieve anonymized historical outcomes relevant to the current lead.
+
+    Memory retrieval is informational at this stage. It does not change
+    qualification results or decision routing. The existing AI Decision
+    Agent will continue to use its current rules until the later
+    memory-aware decision-making step.
+
+    If memory retrieval fails, the workflow continues with an empty
+    memory list rather than interrupting lead processing.
+    """
+
+    lead_id = state.get("lead_id")
+    lead = state.get("lead") or state.get("lead_data") or {}
+    qualification = state.get("qualification") or {}
+
+    try:
+        memories = get_relevant_agent_memories(
+            lead_data=lead,
+            qualification=qualification,
+            limit=5,
+        )
+
+        if not isinstance(memories, list):
+            memories = []
+
+        # Keep the audit event concise. Historical memory contents are
+        # stored in workflow state, not copied into the audit event.
+        create_workflow_event(
+            lead_id,
+            "agent_memory_retrieval_completed",
+            (
+                f"Agent Memory retrieved {len(memories)} relevant "
+                "historical workflow outcome(s)."
+            ),
+            details={
+                "memory_count": len(memories),
+                "memory_limit": 5,
+                "industry": lead.get("industry"),
+                "qualification_category": qualification.get("category"),
+                "retrieval_status": "completed",
+                "memory_used_for_decision": False,
+            },
+        )
+
+        return {
+            "agent_memories": memories,
+            "memory_retrieval_status": "completed",
+            "memory_retrieval_count": len(memories),
+            "stage": "memory_retrieval_completed",
+            "route": "continue",
+        }
+
+    except Exception as exc:
+        # Memory is an enhancement, not a dependency for core workflow
+        # execution. Preserve the existing qualification and decision path.
+        try:
+            create_workflow_event(
+                lead_id,
+                "agent_memory_retrieval_failed",
+                (
+                    "Historical memory retrieval failed. "
+                    "The workflow continued without memory context."
+                ),
+                event_status="warning",
+                details={
+                    "retrieval_status": "failed",
+                    "memory_count": 0,
+                    "error": str(exc),
+                    "workflow_continued": True,
+                },
+            )
+        except Exception:
+            pass
+
+        return {
+            "agent_memories": [],
+            "memory_retrieval_status": "failed",
+            "memory_retrieval_count": 0,
+            "stage": "memory_retrieval_skipped",
+            "route": "continue",
+            "email_warning": (
+                "Historical memory could not be retrieved. "
+                "The lead workflow continued normally."
+            ),
+        }
+
+
+# ============================================================
+# AGENT 6 — AI DECISION AGENT (PHASE 11.1 + 11.2)
 # ============================================================
 
 def ai_decision_agent(state: LeadWorkflowState):
@@ -1807,6 +1906,11 @@ def route_qualification(state):
     return state.get("route", "continue")
 
 
+def route_memory_retrieval(state):
+    # Memory retrieval must never block the core workflow.
+    return "continue"
+
+
 def route_decision(state):
     """
     Only prioritize_sales may continue to owner assignment.
@@ -1840,6 +1944,7 @@ def build_lead_workflow():
     graph.add_node("duplicate_detection", duplicate_detection_agent)
     graph.add_node("lead_creation", lead_creation_agent)
     graph.add_node("qualification", qualification_agent)
+    graph.add_node("memory_retrieval", memory_retrieval_agent)
     graph.add_node("ai_decision", ai_decision_agent)
     graph.add_node("owner_assignment", owner_assignment_agent)
     graph.add_node("email_draft", email_draft_agent)
@@ -1877,8 +1982,18 @@ def build_lead_workflow():
         "qualification",
         route_qualification,
         {
-            "continue": "ai_decision",
+            "continue": "memory_retrieval",
             "error": END,
+        },
+    )
+
+    # Phase 12.2: Retrieve relevant historical outcomes before the
+    # existing AI Decision Agent. Retrieval failure still continues.
+    graph.add_conditional_edges(
+        "memory_retrieval",
+        route_memory_retrieval,
+        {
+            "continue": "ai_decision",
         },
     )
 
