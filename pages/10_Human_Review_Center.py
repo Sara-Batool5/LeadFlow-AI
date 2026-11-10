@@ -10,6 +10,7 @@ from database import (
     get_workflow_events,
     get_leads,
     create_workflow_event,
+    record_agent_feedback,
 )
 
 
@@ -327,9 +328,8 @@ for lead_id, decision_event in latest_decisions.items():
 
     route = selected_route or decision
 
-    # A lead leaves its active queue as soon as a human action is recorded.
-    # The action events are persisted in workflow_events, so this also
-    # remains effective after the page is refreshed or reopened.
+    # A lead leaves its active queue as soon as a human action
+    # is recorded. This remains effective after page refresh.
     if route == "human_review" and lead_id in latest_review_actions:
         continue
 
@@ -643,6 +643,7 @@ else:
 
                     try:
 
+                        # Preserve the existing human review event.
                         create_workflow_event(
                             lead_id=int(lead_id),
                             event_type="human_review_action_recorded",
@@ -662,12 +663,6 @@ else:
                             actor="Human Reviewer",
                         )
 
-                        st.success(
-                            "Human review decision recorded successfully."
-                        )
-
-                        st.rerun()
-
                     except Exception as exc:
 
                         st.error(
@@ -675,6 +670,49 @@ else:
                         )
 
                         st.exception(exc)
+
+                    else:
+
+                        # Record standardized feedback separately.
+                        try:
+
+                            record_agent_feedback(
+                                lead_id=int(lead_id),
+                                feedback_type="human_review",
+                                feedback_value=outcome,
+                                details={
+                                    "previous_ai_decision": decision,
+                                    "qualification_score": score,
+                                    "qualification_category": category,
+                                    "review_source": "Human Review Center",
+                                },
+                                message=(
+                                    "Human feedback recorded for AI decision: "
+                                    f"{outcome}."
+                                ),
+                                actor="Human Reviewer",
+                            )
+
+                        except Exception as feedback_exc:
+
+                            st.warning(
+                                "The human review was saved, but its "
+                                "standardized feedback memory could "
+                                "not be recorded."
+                            )
+
+                            st.exception(feedback_exc)
+
+                            st.rerun()
+
+                        else:
+
+                            st.success(
+                                "Human review decision and AI feedback "
+                                "recorded successfully."
+                            )
+
+                            st.rerun()
 
 
 # ============================================================
@@ -826,6 +864,7 @@ else:
 
                     try:
 
+                        # Preserve the existing information follow-up event.
                         create_workflow_event(
                             lead_id=int(lead_id),
                             event_type="information_followup_recorded",
@@ -843,12 +882,6 @@ else:
                             actor="Human Reviewer",
                         )
 
-                        st.success(
-                            "Information follow-up recorded successfully."
-                        )
-
-                        st.rerun()
-
                     except Exception as exc:
 
                         st.error(
@@ -856,6 +889,47 @@ else:
                         )
 
                         st.exception(exc)
+
+                    else:
+
+                        # Record standardized feedback separately.
+                        try:
+
+                            record_agent_feedback(
+                                lead_id=int(lead_id),
+                                feedback_type="information_followup",
+                                feedback_value=followup_status,
+                                details={
+                                    "missing_information": missing_information,
+                                    "followup_source": "Human Review Center",
+                                },
+                                message=(
+                                    "Information follow-up feedback recorded: "
+                                    f"{followup_status}."
+                                ),
+                                actor="Human Reviewer",
+                            )
+
+                        except Exception as feedback_exc:
+
+                            st.warning(
+                                "The information follow-up was saved, "
+                                "but its standardized feedback memory "
+                                "could not be recorded."
+                            )
+
+                            st.exception(feedback_exc)
+
+                            st.rerun()
+
+                        else:
+
+                            st.success(
+                                "Information follow-up and AI feedback "
+                                "recorded successfully."
+                            )
+
+                            st.rerun()
 
 
 # ============================================================
@@ -1007,14 +1081,8 @@ else:
 
                     try:
 
+                        # Preserve existing approval behavior.
                         approve_email_draft(int(draft_id))
-
-                        st.success(
-                            "Draft approved successfully. "
-                            "The approval has been recorded."
-                        )
-
-                        st.rerun()
 
                     except Exception as exc:
 
@@ -1023,6 +1091,69 @@ else:
                         )
 
                         st.exception(exc)
+
+                    else:
+
+                        if lead_id:
+
+                            # Record approval as standardized feedback.
+                            try:
+
+                                record_agent_feedback(
+                                    lead_id=int(lead_id),
+                                    feedback_type="email_approval",
+                                    feedback_value="approved",
+                                    details={
+                                        "draft_id": int(draft_id),
+                                        "subject": str(subject),
+                                        "approval_source": "Human Review Center",
+                                    },
+                                    message=(
+                                        "Human reviewer approved an "
+                                        "AI-generated email draft."
+                                    ),
+                                    actor="Human Reviewer",
+                                )
+
+                            except Exception as feedback_exc:
+
+                                st.success(
+                                    "Draft approved successfully. "
+                                    "The approval has been recorded."
+                                )
+
+                                st.warning(
+                                    "The draft was approved, but its "
+                                    "standardized feedback memory "
+                                    "could not be recorded."
+                                )
+
+                                st.exception(feedback_exc)
+
+                                st.rerun()
+
+                            else:
+
+                                st.success(
+                                    "Draft approved successfully. "
+                                    "Approval feedback recorded."
+                                )
+
+                                st.rerun()
+
+                        else:
+
+                            st.success(
+                                "Draft approved successfully. "
+                                "The approval has been recorded."
+                            )
+
+                            st.warning(
+                                "No lead ID was available, so standardized "
+                                "feedback could not be associated with a lead."
+                            )
+
+                            st.rerun()
 
                 st.caption(
                     "Approval changes the draft status only. "
