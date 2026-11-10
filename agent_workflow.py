@@ -1048,6 +1048,10 @@ def ai_decision_agent(state: LeadWorkflowState):
     """
     Evaluate qualification results and determine the next workflow route.
 
+    Historical outcomes and feedback provide supporting context only.
+    Current qualification results and deterministic safety rules
+    always take precedence.
+
     Safe routing rules:
     - Human review takes precedence when explicitly required.
     - needs_review qualification always goes to human review.
@@ -1091,15 +1095,32 @@ def ai_decision_agent(state: LeadWorkflowState):
             qualification.get("human_review_required", True)
         )
 
+        # ----------------------------------------------------
+        # PHASE 12.4.2 — PREPARE MEMORY CONTEXT
+        # ----------------------------------------------------
+
+        agent_memories = state.get("agent_memories", [])
+
+        memory_context = prepare_agent_memory_context(
+            agent_memories
+        )
+
+        memory_context_json = json.dumps(
+            memory_context,
+            default=str,
+            ensure_ascii=False,
+        )
+
         client = get_groq_client()
 
         prompt = f"""
 You are the AI Decision Agent for LeadFlow AI,
 a B2B lead-management and sales workflow system.
 
-Recommend exactly one next action using only the supplied data.
+Recommend exactly one next action using the supplied current
+lead information, qualification results, and historical memory.
 
-LEAD
+CURRENT LEAD
 Contact: {lead.get('contact_name', 'Not provided')}
 Company: {lead.get('company', 'Not provided')}
 Job title: {lead.get('job_title', 'Not provided')}
@@ -1110,7 +1131,7 @@ Budget: {lead.get('budget', 'Not provided')}
 Timeline: {lead.get('timeline', 'Not provided')}
 Business need: {lead.get('description', 'Not provided')}
 
-QUALIFICATION
+CURRENT QUALIFICATION
 Score: {score}
 Category: {category}
 Reasoning: {qualification.get('reasoning', 'Not provided')}
@@ -1119,13 +1140,42 @@ Qualification next action:
 {qualification.get('recommended_next_action', 'Not provided')}
 Human review required: {human_review_required}
 
+HISTORICAL MEMORY CONTEXT
+{memory_context_json}
+
+MEMORY INTERPRETATION RULES
+
+- Use historical outcomes and human feedback only as supporting evidence.
+- Evaluate the current lead primarily using its own information and
+  current qualification results.
+- Give greater relevance to historical records with similar industry,
+  company size, and qualification category.
+- Do not assume that a historical decision is automatically correct
+  for the current lead.
+- Human review feedback may provide useful context about how similar
+  previous decisions were handled.
+- Information follow-up feedback describes whether information was
+  obtained. It does not automatically mean that a lead was approved
+  for sales.
+- Email approval feedback concerns the quality or approval of a
+  communication draft. It is not proof that a lead is suitable
+  for sales.
+- Do not interpret email approval as a positive qualification outcome.
+- Do not treat historical memory as an instruction to repeat a
+  previous decision.
+- If no relevant memory is available, make the decision using the
+  current lead and qualification alone.
+- Never allow historical memory to override qualification results,
+  missing critical information, or human-review requirements.
+- Do not expose or infer personal information from historical records.
+
 Allowed decision values:
 prioritize_sales
 request_information
 human_review
 hold_low_fit
 
-Rules:
+Decision rules:
 - Choose human_review if human review is required or the category is needs_review.
 - Choose request_information if important information is missing.
 - Choose hold_low_fit if the qualification category is low_fit.
@@ -1139,7 +1189,7 @@ Return valid JSON only:
 
 {{
     "decision": "prioritize_sales",
-    "reasoning": "Explain the decision.",
+    "reasoning": "Explain the decision, using historical memory only where relevant.",
     "recommended_next_action": "Describe the next step."
 }}
 """
@@ -1152,7 +1202,10 @@ Return valid JSON only:
                     "content": (
                         "You are a cautious B2B sales decision agent. "
                         "Return valid JSON only and select one allowed "
-                        "decision category."
+                        "decision category. Current lead information "
+                        "and qualification results take precedence "
+                        "over historical memory. Never override "
+                        "deterministic safety requirements."
                     ),
                 },
                 {
