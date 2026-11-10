@@ -564,6 +564,58 @@ def record_agent_outcome(
         actor=actor,
     )
 
+def record_agent_feedback(
+    lead_id,
+    feedback_type,
+    feedback_value,
+    details=None,
+    message=None,
+    actor="Human Reviewer",
+):
+    """
+    Record standardized human feedback using the existing
+    workflow_events table.
+    """
+
+    if not lead_id:
+        raise ValueError(
+            "A valid lead_id is required to record agent feedback."
+        )
+
+    feedback_type = str(feedback_type or "").strip().lower()
+    feedback_value = str(feedback_value or "").strip()
+
+    if not feedback_type:
+        raise ValueError(
+            "A feedback type is required."
+        )
+
+    if not feedback_value:
+        raise ValueError(
+            "A feedback value is required."
+        )
+
+    feedback_details = dict(details or {})
+
+    # Standardized fields must remain consistent.
+    feedback_details["feedback_type"] = feedback_type
+    feedback_details["feedback_value"] = feedback_value
+    feedback_details["feedback_recorded"] = True
+
+    return create_workflow_event(
+        lead_id=lead_id,
+        event_type="agent_feedback_recorded",
+        message=(
+            message
+            or (
+                f"Agent feedback recorded: "
+                f"{feedback_type} — {feedback_value}."
+            )
+        ),
+        event_status="completed",
+        details=feedback_details,
+        actor=actor,
+    )
 
 def get_relevant_agent_memories(
     lead_data,
@@ -571,7 +623,7 @@ def get_relevant_agent_memories(
     limit=5,
 ):
     """
-    Retrieve relevant historical agent outcomes.
+    Retrieve relevant historical workflow outcomes and human feedback.
 
     Relevance is based on:
     - Matching industry
@@ -608,6 +660,7 @@ def get_relevant_agent_memories(
     query = """
         SELECT
             w.id AS event_id,
+            w.event_type,
             w.details,
             w.message,
             w.created_at,
@@ -644,7 +697,10 @@ def get_relevant_agent_memories(
         ) q ON TRUE
 
         WHERE
-            w.event_type = 'agent_workflow_outcome_recorded'
+            w.event_type IN (
+                'agent_workflow_outcome_recorded',
+                'agent_feedback_recorded'
+            )
 
         ORDER BY w.created_at DESC
 
@@ -654,6 +710,7 @@ def get_relevant_agent_memories(
     with _connect() as conn:
         with conn.cursor() as cur:
             cur.execute(query)
+
             historical_records = [
                 dict(row) for row in cur.fetchall()
             ]
@@ -697,7 +754,7 @@ def get_relevant_agent_memories(
         ):
             relevance_score += 30
 
-        # Ignore historical leads with no meaningful similarity.
+        # Ignore historical records with no meaningful similarity.
         if relevance_score == 0:
             continue
 
@@ -731,9 +788,12 @@ def get_relevant_agent_memories(
         if not isinstance(missing_information, list):
             missing_information = []
 
-        # Return only information useful for future decisions.
+        # Shared anonymized context for both outcomes and feedback.
         memory = {
+            "record_type": record.get("event_type"),
+
             "industry": record.get("industry"),
+
             "company_size": record.get("company_size"),
 
             "qualification_score": (
@@ -754,40 +814,71 @@ def get_relevant_agent_memories(
                 record.get("recommended_next_action")
             ),
 
-            "outcome": details.get("outcome"),
-
-            "decision": (
-                details.get("decision")
-                or details.get("ai_decision")
-            ),
-
-            "decision_category": (
-                details.get("decision_category")
-            ),
-
-            "decision_route": (
-                details.get("decision_route")
-                or details.get("selected_route")
-            ),
-
-            "assignment_outcome": (
-                details.get("assignment_outcome")
-            ),
-
-            "draft_created": details.get("draft_created"),
-
-            "email_sent": details.get("email_sent", False),
-
-            "generation_method": (
-                details.get("generation_method")
-            ),
-
-            "message": record.get("message"),
-
             "created_at": record.get("created_at"),
 
             "relevance_score": relevance_score,
         }
+
+        if record.get("event_type") == (
+            "agent_workflow_outcome_recorded"
+        ):
+
+            # Preserve the existing historical outcome memory fields.
+            memory.update({
+                "outcome": details.get("outcome"),
+
+                "decision": (
+                    details.get("decision")
+                    or details.get("ai_decision")
+                ),
+
+                "decision_category": (
+                    details.get("decision_category")
+                ),
+
+                "decision_route": (
+                    details.get("decision_route")
+                    or details.get("selected_route")
+                ),
+
+                "assignment_outcome": (
+                    details.get("assignment_outcome")
+                ),
+
+                "draft_created": (
+                    details.get("draft_created")
+                ),
+
+                "email_sent": (
+                    details.get("email_sent", False)
+                ),
+
+                "generation_method": (
+                    details.get("generation_method")
+                ),
+
+                "message": record.get("message"),
+            })
+
+        elif record.get("event_type") == (
+            "agent_feedback_recorded"
+        ):
+
+            # Return standardized feedback without exposing
+            # reviewer notes, contact details, or other raw PII.
+            memory.update({
+                "feedback_type": (
+                    details.get("feedback_type")
+                ),
+
+                "feedback_value": (
+                    details.get("feedback_value")
+                ),
+
+                "feedback_recorded": (
+                    details.get("feedback_recorded", True)
+                ),
+            })
 
         relevant_memories.append(memory)
 
@@ -803,7 +894,6 @@ def get_relevant_agent_memories(
     )
 
     return relevant_memories[:limit]
-
 
 # ============================================================
 # SALES OWNERS AND WORKLOAD
