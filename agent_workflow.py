@@ -1066,6 +1066,10 @@ def ai_decision_agent(state: LeadWorkflowState):
     lead = state.get("lead") or {}
     qualification = state.get("qualification") or {}
 
+    # PHASE 12.4.4 — MEMORY AUDIT TRACKING
+    memory_context = None
+    memory_context_included_in_prompt = False
+
     try:
         if not qualification:
             raise ValueError(
@@ -1110,6 +1114,8 @@ def ai_decision_agent(state: LeadWorkflowState):
             default=str,
             ensure_ascii=False,
         )
+
+        memory_context_included_in_prompt = True
 
         client = get_groq_client()
 
@@ -1347,6 +1353,13 @@ Return valid JSON only:
             workflow_outcome = "stopped_for_human_review"
             final_stage = "workflow_stopped_for_human_review"
 
+        # ----------------------------------------------------
+        # PHASE 12.4.4 — MEMORY DECISION AUDIT
+        # ----------------------------------------------------
+
+        if not isinstance(memory_context, dict):
+            memory_context = {}
+
         decision_result = {
             "decision": decision,
             "reasoning": reasoning,
@@ -1357,6 +1370,22 @@ Return valid JSON only:
             "missing_information": missing_information,
             "selected_route": decision_route,
             "workflow_outcome": workflow_outcome,
+
+            "memory_context_available": bool(
+                memory_context.get("memory_available", False)
+            ),
+            "memory_context_count": memory_context.get(
+                "memory_count", 0
+            ),
+            "memory_outcome_count": len(
+                memory_context.get("historical_outcomes", [])
+            ),
+            "memory_feedback_count": len(
+                memory_context.get("human_feedback", [])
+            ),
+            "memory_context_included_in_prompt": (
+                memory_context_included_in_prompt
+            ),
         }
 
         # Record the AI's final decision.
@@ -1478,6 +1507,20 @@ Return valid JSON only:
             "selected_route": "human_review",
             "workflow_outcome": "stopped_for_human_review",
             "decision_error": str(exc),
+
+            # PHASE 12.4.4 — FALLBACK MEMORY AUDIT
+            "memory_context_available": bool(
+                isinstance(memory_context, dict)
+                and memory_context.get("memory_available", False)
+            ),
+            "memory_context_count": (
+                memory_context.get("memory_count", 0)
+                if isinstance(memory_context, dict)
+                else 0
+            ),
+            "memory_context_included_in_prompt": (
+                memory_context_included_in_prompt
+            ),
         }
 
         try:
