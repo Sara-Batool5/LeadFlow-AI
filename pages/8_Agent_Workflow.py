@@ -571,7 +571,6 @@ with st.form("langgraph_lead_form"):
         use_container_width=True,
     )
 
-
 # ============================================================
 # RUN WORKFLOW
 # ============================================================
@@ -623,12 +622,15 @@ if submitted:
         None,
     )
 
-    if not contact_name.strip() or not email.strip():
-        st.error(
-            "Contact name and email address are required."
-        )
+    # --------------------------------------------------------
+    # PAGE-LEVEL VALIDATION
+    # Required name/email checks are handled by LangGraph.
+    # --------------------------------------------------------
 
-    elif "@" not in email or "." not in email.split("@")[-1]:
+    if email.strip() and (
+        "@" not in email
+        or "." not in email.split("@")[-1]
+    ):
         st.error(
             "Please enter a valid email address."
         )
@@ -666,7 +668,6 @@ if submitted:
             st.error(
                 f"Unable to run the agent workflow: {exc}"
             )
-
 
 # ============================================================
 # DUPLICATE REVIEW AND EXPLICIT CONFIRMATION
