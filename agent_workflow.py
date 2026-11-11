@@ -486,59 +486,81 @@ def record_workflow_outcome_safely(
 def intake_validation_agent(state: LeadWorkflowState):
     lead = dict(state.get("lead_data") or {})
 
-    contact_name = str(
-        lead.get("contact_name")
-        or lead.get("full_name")
-        or ""
-    ).strip()
+    def validation_failure(message):
+        failure = classify_workflow_failure(
+            ValueError(message),
+            stage="intake_validation",
+            lead_created=bool(state.get("lead_id")),
+        )
 
-    email = str(lead.get("email") or "").strip()
-
-    if not contact_name:
         return {
+            **failure,
             "stage": "validation_failed",
             "route": "error",
-            "error": "Contact name is required.",
+            "error": message,
         }
 
-    if not email or "@" not in email:
+    try:
+        contact_name = str(
+            lead.get("contact_name")
+            or lead.get("full_name")
+            or ""
+        ).strip()
+
+        email = str(lead.get("email") or "").strip()
+
+        if not contact_name:
+            return validation_failure(
+                "Contact name is required."
+            )
+
+        if not email or "@" not in email:
+            return validation_failure(
+                "A valid email address is required."
+            )
+
+        domain = email.split("@")[-1]
+
+        if "." not in domain:
+            return validation_failure(
+                "Please provide a valid email address."
+            )
+
+        lead["contact_name"] = contact_name
+
+        lead["description"] = (
+            lead.get("description")
+            or lead.get("need_description")
+            or "Not provided"
+        )
+
+        lead["consent_to_contact"] = bool(
+            lead.get("consent_to_contact", False)
+        )
+
+        lead["priority"] = normalize_lead_priority(
+            lead.get("priority")
+        )
+
         return {
+            "lead_data": lead,
+            "stage": "intake_validated",
+            "route": "continue",
+        }
+
+    except Exception as exc:
+        failure = classify_workflow_failure(
+            exc,
+            stage="intake_validation",
+            lead_created=bool(state.get("lead_id")),
+        )
+
+        return {
+            **failure,
             "stage": "validation_failed",
             "route": "error",
-            "error": "A valid email address is required.",
+            "error": str(exc),
         }
-
-    domain = email.split("@")[-1]
-
-    if "." not in domain:
-        return {
-            "stage": "validation_failed",
-            "route": "error",
-            "error": "Please provide a valid email address.",
-        }
-
-    lead["contact_name"] = contact_name
-
-    lead["description"] = (
-        lead.get("description")
-        or lead.get("need_description")
-        or "Not provided"
-    )
-
-    lead["consent_to_contact"] = bool(
-        lead.get("consent_to_contact", False)
-    )
-
-    lead["priority"] = normalize_lead_priority(
-        lead.get("priority")
-    )
-
-    return {
-        "lead_data": lead,
-        "stage": "intake_validated",
-        "route": "continue",
-    }
-
 
 # ============================================================
 # AGENT 2 — DUPLICATE DETECTION
