@@ -59,7 +59,17 @@ class LeadWorkflowState(TypedDict, total=False):
     route: str
     error: str
     email_warning: str
-
+    
+    # Phase 13.1 — Workflow Failure Detection
+    failure_detected: bool
+    failure_stage: str
+    failure_classification: str
+    underlying_failure_classification: str
+    failure_message: str
+    failure_exception_type: str
+    failure_error_code: str
+    failure_retryable: bool
+    lead_created_before_failure: bool
 
 # ============================================================
 # CONFIGURATION
@@ -193,6 +203,127 @@ def normalize_lead_priority(priority):
         normalized = "unassessed"
 
     return normalized
+
+
+# ============================================================
+# PHASE 13.1 — WORKFLOW FAILURE CLASSIFICATION
+# ============================================================
+
+def classify_workflow_failure(
+    exc,
+    stage,
+    lead_created=False,
+):
+    """
+    Classify a workflow exception without performing retries.
+
+    Categories:
+    - validation_failure
+    - permanent_failure
+    - transient_failure
+    - partial_failure
+    - unknown_failure
+
+    A failure after successful lead creation is classified
+    as partial_failure. Its underlying technical cause is
+    preserved separately.
+    """
+
+    error_message = str(exc or "Unknown workflow error")
+    exception_type = type(exc).__name__
+
+    error_code = str(
+        getattr(exc, "pgcode", None)
+        or getattr(exc, "code", None)
+        or ""
+    )
+
+    stage_name = str(stage or "unknown").strip().lower()
+
+    exception_name = exception_type.lower()
+    error_text = error_message.lower()
+
+    # --------------------------------------------------------
+    # DETERMINE THE UNDERLYING FAILURE
+    # --------------------------------------------------------
+
+    if stage_name in {
+        "intake_validation",
+        "validation",
+    }:
+        underlying_classification = "validation_failure"
+        retryable = False
+
+    elif (
+        exception_name in {
+            "integrityerror",
+            "programmingerror",
+            "dataerror",
+            "notnullviolation",
+            "uniqueviolation",
+            "checkviolation",
+            "foreignkeyviolation",
+        }
+        or error_code.startswith("23")
+        or error_code.startswith("42")
+    ):
+        underlying_classification = "permanent_failure"
+        retryable = False
+
+    elif (
+        exception_name in {
+            "operationalerror",
+            "interfaceerror",
+            "timeouterror",
+            "timeout",
+            "ratelimiterror",
+            "apiconnectionerror",
+            "apitimeouterror",
+            "serviceunavailableerror",
+        }
+        or "timeout" in error_text
+        or "temporarily unavailable" in error_text
+        or "connection reset" in error_text
+        or "connection refused" in error_text
+        or "rate limit" in error_text
+        or "rate_limit" in error_text
+        or "too many requests" in error_text
+        or "service unavailable" in error_text
+    ):
+        underlying_classification = "transient_failure"
+        retryable = True
+
+    elif isinstance(exc, ValueError):
+        underlying_classification = "permanent_failure"
+        retryable = False
+
+    else:
+        underlying_classification = "unknown_failure"
+        retryable = False
+
+    # --------------------------------------------------------
+    # DETERMINE THE OVERALL WORKFLOW FAILURE
+    # --------------------------------------------------------
+
+    if lead_created and stage_name != "lead_creation":
+        classification = "partial_failure"
+
+    else:
+        classification = underlying_classification
+
+    return {
+        "failure_detected": True,
+        "failure_stage": stage_name,
+        "failure_classification": classification,
+        "underlying_failure_classification": (
+            underlying_classification
+        ),
+        "failure_message": error_message,
+        "failure_exception_type": exception_type,
+        "failure_error_code": error_code,
+        "failure_retryable": retryable,
+        "lead_created_before_failure": bool(lead_created),
+    }
 
 
 def parse_email_response(output):
