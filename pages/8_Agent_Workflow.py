@@ -655,6 +655,42 @@ if submitted:
                     allow_duplicate=False,
                 )
 
+                # --------------------------------------------------------
+                # TEMPORARY FAILURE DIAGNOSTICS
+                # Phase 13.1 - Step 2.1
+                # --------------------------------------------------------
+                
+                if result.get("failure_detected"):
+                    st.warning("Workflow Failure Diagnostics")
+                
+                    diagnostic_fields = {
+                        "stage": result.get("stage"),
+                        "route": result.get("route"),
+                        "failure_detected": result.get("failure_detected"),
+                        "failure_stage": result.get("failure_stage"),
+                        "failure_classification": result.get(
+                            "failure_classification"
+                        ),
+                        "underlying_failure_classification": result.get(
+                            "underlying_failure_classification"
+                        ),
+                        "failure_message": result.get("failure_message"),
+                        "failure_exception_type": result.get(
+                            "failure_exception_type"
+                        ),
+                        "failure_error_code": result.get(
+                            "failure_error_code"
+                        ),
+                        "failure_retryable": result.get(
+                            "failure_retryable"
+                        ),
+                        "lead_created_before_failure": result.get(
+                            "lead_created_before_failure"
+                        ),
+                    }
+                
+                    st.json(diagnostic_fields)
+            
             st.session_state[
                 "leadflow_workflow_result"
             ] = result
