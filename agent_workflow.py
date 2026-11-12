@@ -1783,9 +1783,6 @@ Return valid JSON only:
 
 def owner_assignment_agent(state: LeadWorkflowState):
     try:
-        raise ConnectionError(
-            "TEST ONLY: Simulated owner assignment database failure."
-        )
         success, message, owner = assign_lead_automatically(
             state["lead_id"]
         )
