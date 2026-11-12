@@ -306,7 +306,7 @@ def classify_workflow_failure(
     # DETERMINE THE OVERALL WORKFLOW FAILURE
     # --------------------------------------------------------
 
-    if lead_created and stage_name != "lead_creation":
+    if lead_created:
         classification = "partial_failure"
 
     else:
