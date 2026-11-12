@@ -1812,7 +1812,29 @@ def owner_assignment_agent(state: LeadWorkflowState):
         }
 
     except Exception as exc:
+        failure = classify_workflow_failure(
+            exc,
+            stage="owner_assignment",
+            lead_created=bool(state.get("lead_id")),
+        )
+
+        try:
+            create_workflow_event(
+                state["lead_id"],
+                "agent_assignment_failed",
+                "Automatic sales-owner assignment encountered an error.",
+                event_status="warning",
+                details={
+                    **failure,
+                    "assignment_success": False,
+                    "workflow_continued": True,
+                },
+            )
+        except Exception:
+            pass
+
         return {
+            **failure,
             "assignment_success": False,
             "assignment_message": (
                 f"Automatic assignment could not be completed: {exc}"
@@ -1821,7 +1843,6 @@ def owner_assignment_agent(state: LeadWorkflowState):
             "stage": "owner_assignment_warning",
             "route": "continue",
         }
-
 
 # ============================================================
 # AGENT 7 — AI FOLLOW-UP EMAIL DRAFT
