@@ -1857,6 +1857,7 @@ def email_draft_agent(state: LeadWorkflowState):
     2. Retry once if the response is empty or incomplete.
     3. Generate a safe fallback email if both attempts fail.
     4. Save the draft for human review.
+    5. Classify and audit technical failures.
 
     This agent never sends emails.
     """
@@ -1869,9 +1870,16 @@ def email_draft_agent(state: LeadWorkflowState):
         lead = get_lead_by_id(state["lead_id"])
 
     except Exception as exc:
+        failure = classify_workflow_failure(
+            exc,
+            stage="email_draft",
+            lead_created=bool(state.get("lead_id")),
+        )
+
         record_workflow_outcome_safely(
             {
                 **state,
+                **failure,
                 "stage": "email_draft_failed",
             },
             outcome="sales_workflow_email_draft_failed",
@@ -1880,12 +1888,15 @@ def email_draft_agent(state: LeadWorkflowState):
                 "the lead could not be retrieved for draft generation."
             ),
             additional_details={
+                **failure,
                 "draft_created": False,
                 "failure_reason": str(exc),
             },
         )
 
         return {
+            **failure,
+            "draft_created": False,
             "stage": "email_draft_failed",
             "email_warning": (
                 f"Lead retrieval failed during email generation: {exc}"
@@ -1894,9 +1905,18 @@ def email_draft_agent(state: LeadWorkflowState):
         }
 
     if not lead:
+        failure = classify_workflow_failure(
+            ValueError(
+                "Lead could not be retrieved for email generation."
+            ),
+            stage="email_draft",
+            lead_created=bool(state.get("lead_id")),
+        )
+
         record_workflow_outcome_safely(
             {
                 **state,
+                **failure,
                 "stage": "email_draft_failed",
             },
             outcome="sales_workflow_email_draft_failed",
@@ -1905,12 +1925,15 @@ def email_draft_agent(state: LeadWorkflowState):
                 "the lead could not be retrieved for draft generation."
             ),
             additional_details={
+                **failure,
                 "draft_created": False,
                 "failure_reason": "lead_not_found",
             },
         )
 
         return {
+            **failure,
+            "draft_created": False,
             "stage": "email_draft_failed",
             "email_warning": (
                 "Lead could not be retrieved for email generation."
@@ -2156,7 +2179,10 @@ The {owner_name} Team"""
             },
         )
 
-        # Record fallback use separately for easier monitoring.
+        # ----------------------------------------------------
+        # RECORD FALLBACK USE
+        # ----------------------------------------------------
+
         if not ai_generation_success:
             create_workflow_event(
                 state["lead_id"],
@@ -2197,8 +2223,7 @@ The {owner_name} Team"""
                 "The draft was saved for human review."
             )
 
-        # Preserve the distinction between successful email
-        # generation and unsuccessful/pending owner assignment.
+        # Preserve assignment status.
         if not state.get("assignment_success"):
             if ai_generation_success:
                 final_outcome = (
@@ -2254,16 +2279,28 @@ The {owner_name} Team"""
             ),
         }
 
+    # --------------------------------------------------------
+    # EMAIL-STAGE FAILURE CLASSIFICATION
+    # --------------------------------------------------------
+
     except Exception as exc:
+        failure = classify_workflow_failure(
+            exc,
+            stage="email_draft",
+            lead_created=bool(state.get("lead_id")),
+        )
+
         try:
             create_workflow_event(
                 state["lead_id"],
                 "agent_email_draft_failed",
-                "Email draft generation and recovery failed.",
+                "Email draft generation or saving encountered an error.",
+                event_status="warning",
                 details={
-                    "error": str(exc),
+                    **failure,
                     "draft_created": bool(draft_id),
                     "email_draft_id": draft_id,
+                    "email_sent": False,
                 },
             )
         except Exception:
@@ -2272,6 +2309,7 @@ The {owner_name} Team"""
         record_workflow_outcome_safely(
             {
                 **state,
+                **failure,
                 "draft_id": draft_id,
                 "stage": "completed_email_warning",
             },
@@ -2283,12 +2321,14 @@ The {owner_name} Team"""
             message=(
                 "The email stage encountered an error. "
                 + (
-                    "A draft was saved, but a later email-stage operation failed."
+                    "A draft was saved, but a later email-stage "
+                    "operation failed."
                     if draft_id
                     else "No email draft was successfully saved."
                 )
             ),
             additional_details={
+                **failure,
                 "draft_created": bool(draft_id),
                 "email_draft_id": draft_id,
                 "email_sent": False,
@@ -2297,13 +2337,15 @@ The {owner_name} Team"""
         )
 
         return {
+            **failure,
+            "draft_created": bool(draft_id),
+            "draft_id": draft_id,
             "stage": "completed_email_warning",
             "email_warning": (
                 f"Email draft generation failed: {exc}"
             ),
             "route": "complete",
         }
-
 
 # ============================================================
 # ROUTING FUNCTIONS
