@@ -1003,14 +1003,20 @@ human_review_required: false
             "stage": "qualification_completed",
             "route": "continue",
         }
-
+    
     except Exception as exc:
+        failure = classify_workflow_failure(
+            exc,
+            stage="qualification",
+            lead_created=bool(state.get("lead_id")),
+        )
+
         return {
+            **failure,
             "stage": "qualification_failed",
             "route": "error",
             "error": str(exc),
         }
-
 
 # ============================================================
 # AGENT 5 — HISTORICAL MEMORY RETRIEVAL (PHASE 12.2)
