@@ -1946,20 +1946,29 @@ def email_draft_agent(state: LeadWorkflowState):
     # --------------------------------------------------------
 
     if not lead.get("consent_to_contact"):
-        create_workflow_event(
-            state["lead_id"],
-            "agent_email_skipped_no_consent",
-            (
-                "Email draft generation was skipped because "
-                "contact consent is not recorded."
-            ),
-            details={
-                "draft_created": False,
-                "reason": "consent_not_recorded",
-            },
-        )
 
-        record_workflow_outcome_safely(
+        consent_audit_failure = None
+
+        # Record why email generation was skipped.
+        try:
+            create_workflow_event(
+                state["lead_id"],
+                "agent_email_skipped_no_consent",
+                (
+                    "Email draft generation was skipped because "
+                    "contact consent is not recorded."
+                ),
+                details={
+                    "draft_created": False,
+                    "reason": "consent_not_recorded",
+                },
+            )
+
+        except Exception as exc:
+            consent_audit_failure = exc
+
+        # Record the normal workflow outcome safely.
+        outcome_recorded = record_workflow_outcome_safely(
             {
                 **state,
                 "stage": "completed_no_email_consent",
@@ -1976,15 +1985,42 @@ def email_draft_agent(state: LeadWorkflowState):
             },
         )
 
+        # If the consent audit failed, classify that failure.
+        if consent_audit_failure is not None:
+
+            failure = classify_workflow_failure(
+                consent_audit_failure,
+                stage="email_draft",
+                lead_created=bool(state.get("lead_id")),
+            )
+
+            return {
+                **failure,
+                "draft_created": False,
+                "stage": "completed_email_warning",
+                "email_warning": (
+                    "Email generation was correctly skipped because "
+                    "consent was not recorded, but the consent audit "
+                    "event could not be saved: "
+                    f"{consent_audit_failure}"
+                ),
+                "route": "complete",
+            }
+
         return {
             "stage": "completed_no_email_consent",
             "email_warning": (
-                "No email draft was generated because contact consent "
-                "is not recorded for this lead."
+                ""
+                if outcome_recorded
+                else (
+                    "Email generation was skipped because consent "
+                    "was not recorded. The workflow outcome could "
+                    "not be recorded."
+                )
             ),
             "route": "complete",
         }
-
+        
     # --------------------------------------------------------
     # EMAIL GENERATION AND SAVING
     # --------------------------------------------------------
