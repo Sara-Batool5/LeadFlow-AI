@@ -567,23 +567,38 @@ def intake_validation_agent(state: LeadWorkflowState):
 # ============================================================
 
 def duplicate_detection_agent(state: LeadWorkflowState):
-    lead_data = state["lead_data"]
+    try:
+        lead_data = state.get("lead_data") or {}
 
-    matches = find_potential_duplicates(lead_data)
+        matches = find_potential_duplicates(lead_data)
 
-    if matches and not state.get("allow_duplicate", False):
+        if matches and not state.get("allow_duplicate", False):
+            return {
+                "duplicate_matches": matches,
+                "stage": "duplicate_review_required",
+                "route": "duplicate_review",
+            }
+
         return {
-            "duplicate_matches": matches,
-            "stage": "duplicate_review_required",
-            "route": "duplicate_review",
+            "duplicate_matches": matches or [],
+            "stage": "duplicate_check_passed",
+            "route": "continue",
         }
 
-    return {
-        "duplicate_matches": matches or [],
-        "stage": "duplicate_check_passed",
-        "route": "continue",
-    }
+    except Exception as exc:
+        failure = classify_workflow_failure(
+            exc,
+            stage="duplicate_detection",
+            lead_created=bool(state.get("lead_id")),
+        )
 
+        return {
+            **failure,
+            "duplicate_matches": [],
+            "stage": "duplicate_detection_failed",
+            "route": "error",
+            "error": str(exc),
+        }
 
 # ============================================================
 # AGENT 3 — LEAD CREATION
