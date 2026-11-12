@@ -274,6 +274,7 @@ def classify_workflow_failure(
         exception_name in {
             "operationalerror",
             "interfaceerror",
+            "connectionerror",
             "timeouterror",
             "timeout",
             "ratelimiterror",
