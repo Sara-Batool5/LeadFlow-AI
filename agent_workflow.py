@@ -570,6 +570,10 @@ def duplicate_detection_agent(state: LeadWorkflowState):
     try:
         lead_data = state.get("lead_data") or {}
 
+        raise ConnectionError(
+            "TEST ONLY: Simulated Neon database connection failure."
+        )
+        
         matches = find_potential_duplicates(lead_data)
 
         if matches and not state.get("allow_duplicate", False):
