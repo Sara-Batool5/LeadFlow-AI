@@ -1671,10 +1671,16 @@ Return valid JSON only:
         }
 
     except Exception as exc:
+        failure = classify_workflow_failure(
+            exc,
+            stage="ai_decision",
+            lead_created=bool(lead_id),
+        )
         # A failed or uncertain decision must never continue
         # automatically to owner assignment.
 
         fallback_decision = {
+            **failure,
             "decision": "human_review",
             "reasoning": (
                 "The AI Decision Agent could not complete a reliable "
@@ -1749,6 +1755,7 @@ Return valid JSON only:
             pass
 
         return {
+            **failure,
             "ai_decision": fallback_decision,
             "decision_category": "human_review",
             "decision_reasoning": fallback_decision["reasoning"],
