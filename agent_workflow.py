@@ -2519,10 +2519,9 @@ def build_lead_workflow():
 
 def run_lead_workflow(lead_data, allow_duplicate=False):
     """
-    Execute the complete LangGraph lead workflow.
+    Execute the complete LangGraph lead workflow
+    with top-level failure protection.
     """
-
-    graph = build_lead_workflow()
 
     initial_state = {
         "lead_data": dict(lead_data),
@@ -2532,4 +2531,25 @@ def run_lead_workflow(lead_data, allow_duplicate=False):
         "route": "continue",
     }
 
-    return graph.invoke(initial_state)
+    try:
+        graph = build_lead_workflow()
+
+        return graph.invoke(initial_state)
+
+    except Exception as exc:
+
+        # A top-level exception may occur before or during graph
+        # execution. Do not assume a lead was successfully created.
+        failure = classify_workflow_failure(
+            exc,
+            stage="graph_execution",
+            lead_created=False,
+        )
+
+        return {
+            **initial_state,
+            **failure,
+            "stage": "workflow_execution_failed",
+            "route": "error",
+            "error": str(exc),
+        }
