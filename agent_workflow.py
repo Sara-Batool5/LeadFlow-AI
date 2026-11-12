@@ -606,6 +606,8 @@ def duplicate_detection_agent(state: LeadWorkflowState):
 # ============================================================
 
 def lead_creation_agent(state: LeadWorkflowState):
+    lead_id = None
+
     try:
         created = create_lead(state["lead_data"])
 
@@ -630,12 +632,18 @@ def lead_creation_agent(state: LeadWorkflowState):
         }
 
     except Exception as exc:
+        failure = classify_workflow_failure(
+            exc,
+            stage="lead_creation",
+            lead_created=bool(lead_id),
+        )
+
         return {
+            **failure,
             "stage": "lead_creation_failed",
             "route": "error",
             "error": str(exc),
         }
-
 
 # ============================================================
 # AGENT 4 — AI LEAD QUALIFICATION
