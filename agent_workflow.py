@@ -2145,6 +2145,9 @@ The {owner_name} Team"""
         # SAVE THE DRAFT
         # ----------------------------------------------------
 
+        raise ConnectionError(
+            "TEST ONLY: Simulated email draft database failure."
+        )
         draft_id = save_email_draft(
             state["lead_id"],
             lead.get("email"),
