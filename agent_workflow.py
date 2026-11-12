@@ -2335,13 +2335,14 @@ def build_lead_workflow():
             "error": END,
         },
     )
-
+  
     graph.add_conditional_edges(
         "duplicate_detection",
         route_duplicates,
         {
             "continue": "lead_creation",
             "duplicate_review": END,
+            "error": END,
         },
     )
 
