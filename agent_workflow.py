@@ -2105,6 +2105,15 @@ def email_draft_agent(state: LeadWorkflowState):
                 lead_created=bool(state.get("lead_id")),
             )
 
+            record_workflow_failure_safely(
+                state.get("lead_id"),
+                failure,
+                message=(
+                    "The workflow could not record the email-skip event "
+                    "because contact consent was not recorded."
+                ),
+            )
+            
             return {
                 **failure,
                 "draft_created": False,
