@@ -1760,6 +1760,14 @@ Return valid JSON only:
             stage="ai_decision",
             lead_created=bool(lead_id),
         )
+        record_workflow_failure_safely(
+            state.get("lead_id"),
+            failure,
+            message=(
+                "An error occurred during AI decision making. "
+                "The workflow will use its safe human-review fallback."
+            ),
+        )
         # A failed or uncertain decision must never continue
         # automatically to owner assignment.
 
