@@ -1910,6 +1910,15 @@ def owner_assignment_agent(state: LeadWorkflowState):
             lead_created=bool(state.get("lead_id")),
         )
 
+        record_workflow_failure_safely(
+            state.get("lead_id"),
+            failure,
+            message=(
+                "An error occurred during sales owner assignment. "
+                "The workflow will continue to the email draft stage."
+            ),
+        )
+
         try:
             create_workflow_event(
                 state["lead_id"],
