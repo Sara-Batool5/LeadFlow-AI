@@ -706,6 +706,14 @@ def lead_creation_agent(state: LeadWorkflowState):
             lead_created=bool(lead_id),
         )
 
+        record_workflow_failure_safely(
+            lead_id,
+            failure,
+            message=(
+                "An error occurred during lead creation."
+            ),
+        )
+
         return {
             **failure,
             "stage": "lead_creation_failed",
