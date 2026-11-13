@@ -326,6 +326,48 @@ def classify_workflow_failure(
         "lead_created_before_failure": bool(lead_created),
     }
 
+def record_workflow_failure_safely(
+    lead_id,
+    failure,
+    message=None,
+    additional_details=None,
+):
+    """
+    Record a standardized workflow failure event.
+
+    Audit logging must never interrupt the main workflow.
+    A None lead_id is allowed for failures before lead creation.
+    """
+
+    details = dict(failure or {})
+
+    if additional_details:
+        details.update(additional_details)
+
+    failure_stage = details.get(
+        "failure_stage",
+        "unknown",
+    )
+
+    event_message = message or (
+        f"Workflow failure detected at stage: {failure_stage}."
+    )
+
+    try:
+        create_workflow_event(
+            lead_id,
+            "agent_workflow_failure_detected",
+            event_message,
+            event_status="failed",
+            details=details,
+        )
+
+        return True
+
+    except Exception:
+        # Failure-audit logging must not cause another
+        # workflow failure or interrupt existing recovery.
+        return False
 
 def parse_email_response(output):
     output = (output or "").strip()
