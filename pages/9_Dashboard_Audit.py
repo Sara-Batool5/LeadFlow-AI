@@ -489,6 +489,106 @@ def show_email_updated(details):
     st.write(details.get("recipient_email") or "—")
 
 
+def show_workflow_failure_details(details):
+
+    st.subheader("Workflow Failure Diagnostics")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        detail_metric(
+            "Failure Stage",
+            humanize_value(details.get("failure_stage")),
+        )
+
+    with col2:
+        detail_metric(
+            "Failure Classification",
+            humanize_value(details.get("failure_classification")),
+        )
+
+    with col3:
+        detail_metric(
+            "Underlying Classification",
+            humanize_value(
+                details.get("underlying_failure_classification")
+            ),
+        )
+
+    st.markdown("#### Technical Information")
+
+    technical_col1, technical_col2 = st.columns(2)
+
+    with technical_col1:
+        detail_metric(
+            "Exception Type",
+            details.get("failure_exception_type"),
+        )
+
+        detail_metric(
+            "Error Code",
+            details.get("failure_error_code") or "Not available",
+        )
+
+    with technical_col2:
+        detail_metric(
+            "Retryable",
+            "Yes" if details.get("failure_retryable") is True else "No",
+        )
+
+        detail_metric(
+            "Lead Created Before Failure",
+            (
+                "Yes"
+                if details.get("lead_created_before_failure") is True
+                else "No"
+            ),
+        )
+
+    st.markdown("#### Failure Message")
+
+    failure_message = details.get("failure_message")
+
+    if failure_message:
+        st.error(failure_message)
+    else:
+        st.info("No technical failure message was stored.")
+
+    st.markdown("#### Additional Recovery Information")
+
+    detail_metric(
+        "Email Draft Created",
+        (
+            "Yes"
+            if details.get("draft_created") is True
+            else "No"
+            if details.get("draft_created") is False
+            else "Not recorded"
+        ),
+    )
+
+    detail_metric(
+        "Email Draft ID",
+        details.get("email_draft_id") or "Not available",
+    )
+
+    detail_metric(
+        "Email Sent",
+        "Yes" if details.get("email_sent") is True else "No",
+    )
+
+    if details.get("lead_creation_state_known") is False:
+        st.warning(
+            "The lead creation state is unknown because the workflow "
+            "failed at the top-level execution handler."
+        )
+
+    elif details.get("lead_creation_state") == "unknown":
+        st.warning(
+            "The workflow could not confirm whether lead creation "
+            "completed before the failure."
+        )
+
 def show_generic_details(details):
 
     st.subheader("Additional Event Information")
@@ -534,6 +634,7 @@ def show_event_details(event):
         "agent_email_skipped_no_consent": show_email_skipped,
         "email_draft_approved": show_email_approved,
         "email_draft_updated": show_email_updated,
+        "agent_workflow_failure_detected": show_workflow_failure_details,
     }
 
     formatter = event_formatters.get(event_type)
@@ -1172,6 +1273,10 @@ else:
                     str(event.get("event_status") or ""),
                     str(event.get("message") or ""),
                     str(event.get("actor") or ""),
+                    json.dumps(
+                        safe_json(event.get("details")),
+                        default=str,
+                    ),
                 ]
             ).lower()
         ]
