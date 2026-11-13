@@ -2688,6 +2688,19 @@ def run_lead_workflow(lead_data, allow_duplicate=False):
             lead_created=False,
         )
 
+        record_workflow_failure_safely(
+            None,
+            failure,
+            message=(
+                "The lead workflow encountered an unexpected "
+                "error during graph execution."
+            ),
+            additional_details={
+                "lead_creation_state_known": False,
+                "lead_creation_state": "unknown",
+            },
+        )
+        
         return {
             **initial_state,
             **failure,
