@@ -2013,7 +2013,17 @@ def email_draft_agent(state: LeadWorkflowState):
             stage="email_draft",
             lead_created=bool(state.get("lead_id")),
         )
-
+    
+        # Record the standardized workflow failure
+        record_workflow_failure_safely(
+            state.get("lead_id"),
+            failure,
+            message=(
+                "The lead could not be retrieved for email "
+                "draft generation."
+            ),
+        )
+    
         record_workflow_outcome_safely(
             {
                 **state,
@@ -2031,7 +2041,7 @@ def email_draft_agent(state: LeadWorkflowState):
                 "failure_reason": "lead_not_found",
             },
         )
-
+    
         return {
             **failure,
             "draft_created": False,
@@ -2041,7 +2051,7 @@ def email_draft_agent(state: LeadWorkflowState):
             ),
             "route": "complete",
         }
-
+        
     # --------------------------------------------------------
     # CONSENT CHECK
     # --------------------------------------------------------
@@ -2425,6 +2435,15 @@ The {owner_name} Team"""
             exc,
             stage="email_draft",
             lead_created=bool(state.get("lead_id")),
+        )
+
+        record_workflow_failure_safely(
+            state.get("lead_id"),
+            failure,
+            message=(
+                "An error occurred while retrieving the lead "
+                "for email draft generation."
+            ),
         )
 
         try:
