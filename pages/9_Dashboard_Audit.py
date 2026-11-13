@@ -536,13 +536,23 @@ def show_workflow_failure_details(details):
             "Yes" if details.get("failure_retryable") is True else "No",
         )
 
+        lead_creation_unknown = (
+            details.get("lead_creation_state_known") is False
+            or details.get("lead_creation_state") == "unknown"
+        )
+    
+        if lead_creation_unknown:
+            lead_creation_value = "Unknown"
+        elif details.get("lead_created_before_failure") is True:
+            lead_creation_value = "Yes"
+        elif details.get("lead_created_before_failure") is False:
+            lead_creation_value = "No"
+        else:
+            lead_creation_value = "Not recorded"
+    
         detail_metric(
             "Lead Created Before Failure",
-            (
-                "Yes"
-                if details.get("lead_created_before_failure") is True
-                else "No"
-            ),
+            lead_creation_value,
         )
 
     st.markdown("#### Failure Message")
