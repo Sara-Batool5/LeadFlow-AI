@@ -1079,12 +1079,20 @@ human_review_required: false
             "stage": "qualification_completed",
             "route": "continue",
         }
-    
+
     except Exception as exc:
         failure = classify_workflow_failure(
             exc,
             stage="qualification",
             lead_created=bool(state.get("lead_id")),
+        )
+
+        record_workflow_failure_safely(
+            state.get("lead_id"),
+            failure,
+            message=(
+                "An error occurred during lead qualification."
+            ),
         )
 
         return {
