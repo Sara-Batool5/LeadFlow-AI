@@ -645,12 +645,20 @@ def duplicate_detection_agent(state: LeadWorkflowState):
             "stage": "duplicate_check_passed",
             "route": "continue",
         }
-
+   
     except Exception as exc:
         failure = classify_workflow_failure(
             exc,
             stage="duplicate_detection",
             lead_created=bool(state.get("lead_id")),
+        )
+
+        record_workflow_failure_safely(
+            state.get("lead_id"),
+            failure,
+            message=(
+                "An error occurred during lead duplicate detection."
+            ),
         )
 
         return {
