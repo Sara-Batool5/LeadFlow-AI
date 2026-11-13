@@ -1977,6 +1977,19 @@ def email_draft_agent(state: LeadWorkflowState):
             lead_created=bool(state.get("lead_id")),
         )
 
+        record_workflow_failure_safely(
+            state.get("lead_id"),
+            failure,
+            message=(
+                "An error occurred during email draft generation or saving."
+            ),
+            additional_details={
+                "draft_created": bool(draft_id),
+                "email_draft_id": draft_id,
+                "email_sent": False,
+            },
+        )
+        
         record_workflow_outcome_safely(
             {
                 **state,
