@@ -528,12 +528,21 @@ def record_workflow_outcome_safely(
 
 def intake_validation_agent(state: LeadWorkflowState):
     lead = dict(state.get("lead_data") or {})
-
+ 
     def validation_failure(message):
         failure = classify_workflow_failure(
             ValueError(message),
             stage="intake_validation",
             lead_created=bool(state.get("lead_id")),
+        )
+
+        record_workflow_failure_safely(
+            state.get("lead_id"),
+            failure,
+            message=(
+                "Lead intake validation failed: "
+                + str(message)
+            ),
         )
 
         return {
@@ -596,6 +605,15 @@ def intake_validation_agent(state: LeadWorkflowState):
             exc,
             stage="intake_validation",
             lead_created=bool(state.get("lead_id")),
+        )
+
+        record_workflow_failure_safely(
+            state.get("lead_id"),
+            failure,
+            message=(
+                "An unexpected error occurred during lead "
+                "intake validation."
+            ),
         )
 
         return {
