@@ -629,13 +629,8 @@ def intake_validation_agent(state: LeadWorkflowState):
 
 def duplicate_detection_agent(state: LeadWorkflowState):
     try:
-        # TEMPORARY TEST: simulate a database connection failure.
-        raise ConnectionError(
-            "TEST ONLY: Simulated duplicate-detection connection failure."
-        )
-
         lead_data = state.get("lead_data") or {}
-
+        
         matches = find_potential_duplicates(lead_data)
 
         if matches and not state.get("allow_duplicate", False):
@@ -650,7 +645,7 @@ def duplicate_detection_agent(state: LeadWorkflowState):
             "stage": "duplicate_check_passed",
             "route": "continue",
         }
-
+   
     except Exception as exc:
         failure = classify_workflow_failure(
             exc,
