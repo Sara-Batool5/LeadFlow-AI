@@ -19,6 +19,9 @@ from database import (
     save_email_draft,
     record_agent_outcome,
     get_relevant_agent_memories,
+    get_qualification_results,
+    get_workflow_events,
+    get_email_drafts,
 )
 
 
@@ -2810,6 +2813,425 @@ def run_lead_workflow(lead_data, allow_duplicate=False):
             **initial_state,
             **failure,
             "stage": "workflow_execution_failed",
+            "route": "error",
+            "error": str(exc),
+        }
+
+
+def resume_lead_workflow(lead_id):
+    """
+    Resume an incomplete workflow for an existing lead.
+
+    Recovery checks the database before each stage to avoid:
+    - Creating a second lead
+    - Repeating a saved qualification
+    - Repeating a saved decision
+    - Reassigning an existing owner
+    - Creating a duplicate email draft
+
+    This function never sends emails.
+    """
+
+    try:
+        lead_id = int(lead_id)
+
+        # ----------------------------------------------------
+        # 1. LOAD THE EXISTING LEAD AND VERIFY FAILURE
+        # ----------------------------------------------------
+
+        lead = get_lead_by_id(lead_id)
+
+        if not lead:
+            return {
+                "stage": "recovery_failed",
+                "error": "The selected lead could not be found.",
+            }
+
+        events = get_workflow_events(lead_id)
+
+        failure_events = [
+            event for event in events
+            if event.get("event_type") == "agent_workflow_failure_detected"
+        ]
+
+        if not failure_events:
+            return {
+                "lead_id": lead_id,
+                "lead_reference": lead.get("lead_reference"),
+                "stage": "recovery_failed",
+                "error": (
+                    "No recorded technical workflow failure was found "
+                    "for this lead. Recovery was not started."
+                ),
+            }
+
+        latest_failure = failure_events[0]
+        failure_details = latest_failure.get("details") or {}
+
+        if isinstance(failure_details, str):
+            try:
+                failure_details = json.loads(failure_details)
+            except Exception:
+                failure_details = {}
+
+        if (
+            failure_details.get("failure_classification")
+            != "partial_failure"
+            or not failure_details.get("lead_created_before_failure")
+        ):
+            return {
+                "lead_id": lead_id,
+                "lead_reference": lead.get("lead_reference"),
+                "stage": "recovery_failed",
+                "error": (
+                    "The recorded failure does not confirm that a lead "
+                    "was created before the failure. Automatic recovery "
+                    "was not started."
+                ),
+            }
+
+        # Do not repeat a recovery that was already completed
+        # after this failure event.
+        failure_index = events.index(latest_failure)
+
+        for index, event in enumerate(events):
+            if (
+                event.get("event_type")
+                == "agent_workflow_recovery_completed"
+                and index < failure_index
+            ):
+                return {
+                    "lead_id": lead_id,
+                    "lead_reference": lead.get("lead_reference"),
+                    "stage": "recovery_failed",
+                    "error": (
+                        "A recovery was already completed after the "
+                        "recorded failure. No further recovery is needed."
+                    ),
+                }
+
+        create_workflow_event(
+            lead_id,
+            "agent_workflow_recovery_started",
+            "Partial workflow recovery started for an existing lead.",
+            event_status="warning",
+            details={
+                "original_failure_stage": failure_details.get(
+                    "failure_stage"
+                ),
+                "original_failure_classification": failure_details.get(
+                    "failure_classification"
+                ),
+                "recovery_method": "database_state_checked_resume",
+                "new_lead_created": False,
+            },
+        )
+
+        # Shared state for the existing workflow agents.
+        state = {
+            "lead_id": lead_id,
+            "lead": lead,
+            "lead_data": lead,
+            "stage": "recovery_started",
+            "route": "continue",
+            "duplicate_matches": [],
+        }
+
+        # ----------------------------------------------------
+        # 2. RESTORE SAVED QUALIFICATION OR RUN IT IF MISSING
+        # ----------------------------------------------------
+
+        qualification_rows = get_qualification_results(lead_id)
+
+        if qualification_rows:
+            saved = qualification_rows[0]
+
+            missing = saved.get("missing_information") or []
+
+            if isinstance(missing, str):
+                try:
+                    missing = json.loads(missing)
+                except Exception:
+                    missing = [missing]
+
+            if not isinstance(missing, list):
+                missing = []
+
+            category = normalize_qualification_category(
+                saved.get("category"),
+                saved.get("score"),
+            )
+
+            qualification = {
+                "score": int(saved.get("score") or 0),
+                "category": category,
+                "reasoning": saved.get("reasoning") or "",
+                "missing_information": missing,
+                "critical_missing_information": missing,
+                "additional_discovery_information": [],
+                "all_missing_information": missing,
+                "recommended_next_action": (
+                    saved.get("recommended_next_action")
+                    or "Review the qualification."
+                ),
+                "human_review_required": bool(
+                    saved.get("human_review_required", True)
+                ),
+            }
+
+            state["qualification"] = qualification
+            state["stage"] = "qualification_restored"
+
+        else:
+            qualification_result = qualification_agent(state)
+            state.update(qualification_result)
+
+            if (
+                not state.get("qualification")
+                or state.get("route") == "error"
+            ):
+                return {
+                    **state,
+                    "lead_id": lead_id,
+                    "lead_reference": lead.get("lead_reference"),
+                    "stage": "recovery_failed",
+                    "error": state.get(
+                        "error",
+                        "Qualification could not be recovered.",
+                    ),
+                }
+
+        # ----------------------------------------------------
+        # 3. RESTORE THE SAVED DECISION OR MAKE IT IF MISSING
+        # ----------------------------------------------------
+
+        events = get_workflow_events(lead_id)
+
+        decision_event = next(
+            (
+                event for event in events
+                if event.get("event_type")
+                in {
+                    "agent_decision_route_selected",
+                    "agent_ai_decision_completed",
+                    "agent_ai_decision_fallback",
+                }
+            ),
+            None,
+        )
+
+        decision_route = None
+
+        if decision_event:
+            decision_details = decision_event.get("details") or {}
+
+            if isinstance(decision_details, str):
+                try:
+                    decision_details = json.loads(decision_details)
+                except Exception:
+                    decision_details = {}
+
+            decision_route = (
+                decision_details.get("selected_route")
+                or decision_details.get("decision_route")
+            )
+
+            decision_category = (
+                decision_details.get("decision")
+                or decision_route
+            )
+
+            if decision_route in ALLOWED_DECISION_CATEGORIES:
+                decision_details["decision"] = decision_category
+                decision_details["selected_route"] = decision_route
+
+                state.update({
+                    "ai_decision": decision_details,
+                    "decision_category": decision_category,
+                    "decision_reasoning": decision_details.get(
+                        "reasoning", ""
+                    ),
+                    "decision_next_action": decision_details.get(
+                        "recommended_next_action", ""
+                    ),
+                    "decision_route": decision_route,
+                    "workflow_outcome": decision_details.get(
+                        "workflow_outcome", ""
+                    ),
+                    "missing_information": decision_details.get(
+                        "missing_information", []
+                    ),
+                    "stage": "decision_restored",
+                    "route": decision_route,
+                })
+
+        if not decision_route:
+            memory_result = memory_retrieval_agent(state)
+            state.update(memory_result)
+
+            decision_result = ai_decision_agent(state)
+            state.update(decision_result)
+
+            decision_route = state.get("decision_route")
+
+        # ----------------------------------------------------
+        # 4. RESPECT INTENTIONAL STOP ROUTES
+        # ----------------------------------------------------
+
+        if decision_route != "prioritize_sales":
+
+            stop_messages = {
+                "request_information": (
+                    "The saved decision requires additional information. "
+                    "Recovery stopped without sales assignment."
+                ),
+                "human_review": (
+                    "The saved decision requires human review. "
+                    "Recovery stopped without sales assignment."
+                ),
+                "hold_low_fit": (
+                    "The saved decision holds this lead as low fit. "
+                    "Recovery stopped without sales assignment."
+                ),
+            }
+
+            if decision_route not in stop_messages:
+                raise ValueError(
+                    "No valid saved decision route is available. "
+                    "Automatic sales processing was stopped."
+                )
+
+            state["stage"] = {
+                "request_information": "workflow_stopped_for_information",
+                "human_review": "workflow_stopped_for_human_review",
+                "hold_low_fit": "workflow_held_low_fit",
+            }[decision_route]
+
+            create_workflow_event(
+                lead_id,
+                "agent_workflow_recovery_completed",
+                stop_messages[decision_route],
+                details={
+                    "recovery_successful": True,
+                    "decision_route": decision_route,
+                    "sales_assignment_started": False,
+                    "email_draft_created": False,
+                    "new_lead_created": False,
+                },
+            )
+
+            return {
+                **state,
+                "lead_id": lead_id,
+                "lead_reference": lead.get("lead_reference"),
+            }
+
+        # ----------------------------------------------------
+        # 5. PRESERVE EXISTING OWNER OR ASSIGN IF MISSING
+        # ----------------------------------------------------
+
+        lead = get_lead_by_id(lead_id)
+
+        if lead.get("assigned_owner_id"):
+            state.update({
+                "assignment_success": True,
+                "assignment_message": (
+                    "The existing sales-owner assignment was preserved."
+                ),
+                "assigned_owner": {
+                    "full_name": (
+                        lead.get("assigned_owner") or "Existing owner"
+                    ),
+                    "specialization": "Existing assignment preserved",
+                },
+            })
+
+        else:
+            assignment_result = owner_assignment_agent(state)
+            state.update(assignment_result)
+
+        # Refresh lead after assignment.
+        lead = get_lead_by_id(lead_id)
+        state["lead"] = lead
+
+        # ----------------------------------------------------
+        # 6. PRESERVE EXISTING DRAFT OR CREATE ONE IF MISSING
+        # ----------------------------------------------------
+
+        existing_drafts = get_email_drafts(lead_id)
+
+        if existing_drafts:
+            existing_draft = existing_drafts[0]
+
+            state.update({
+                "draft_id": existing_draft.get("id"),
+                "email_subject": existing_draft.get("subject") or "",
+                "email_body": existing_draft.get("body") or "",
+                "stage": "workflow_completed",
+                "route": "complete",
+                "email_warning": (
+                    "An existing email draft was found and preserved. "
+                    "No duplicate draft was created."
+                ),
+            })
+
+        else:
+            email_result = email_draft_agent(state)
+            state.update(email_result)
+
+        # ----------------------------------------------------
+        # 7. RECORD RECOVERY RESULT
+        # ----------------------------------------------------
+
+        create_workflow_event(
+            lead_id,
+            "agent_workflow_recovery_completed",
+            "Partial workflow recovery finished using the existing lead record.",
+            event_status="completed",
+            details={
+                "recovery_successful": True,
+                "decision_route": state.get("decision_route"),
+                "assignment_success": state.get("assignment_success"),
+                "assigned_owner_id": (
+                    lead.get("assigned_owner_id")
+                ),
+                "email_draft_id": state.get("draft_id"),
+                "existing_draft_preserved": bool(existing_drafts),
+                "email_sent": False,
+                "new_lead_created": False,
+            },
+        )
+
+        return {
+            **state,
+            "lead_id": lead_id,
+            "lead_reference": lead.get("lead_reference"),
+        }
+
+    except Exception as exc:
+
+        failure = classify_workflow_failure(
+            exc,
+            stage="partial_recovery",
+            lead_created=True,
+        )
+
+        record_workflow_failure_safely(
+            lead_id if "lead_id" in locals() else None,
+            failure,
+            message=(
+                "Partial workflow recovery encountered an error."
+            ),
+            additional_details={
+                "recovery_attempted": True,
+                "new_lead_created": False,
+            },
+        )
+
+        return {
+            "lead_id": lead_id if "lead_id" in locals() else None,
+            **failure,
+            "stage": "recovery_failed",
             "route": "error",
             "error": str(exc),
         }
