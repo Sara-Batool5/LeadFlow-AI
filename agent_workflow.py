@@ -722,21 +722,8 @@ def duplicate_detection_agent(state: LeadWorkflowState):
     try:
         lead_data = state.get("lead_data") or {}
         
-        test_attempts = {"count": 0}
-
-        def test_duplicate_lookup():
-            test_attempts["count"] += 1
-        
-            if test_attempts["count"] == 1:
-                raise ConnectionError(
-                    "TEST ONLY: Simulated one-time connection failure."
-                )
-        
-            return find_potential_duplicates(lead_data)
-        
-        
         matches = run_with_safe_retry(
-            test_duplicate_lookup,
+            lambda: find_potential_duplicates(lead_data),
             stage="duplicate_detection",
             lead_id=state.get("lead_id"),
         )
