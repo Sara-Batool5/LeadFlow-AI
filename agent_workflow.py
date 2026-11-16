@@ -825,6 +825,9 @@ def lead_creation_agent(state: LeadWorkflowState):
 
 def qualification_agent(state: LeadWorkflowState):
     try:
+        raise ConnectionError(
+            "TEST ONLY: Simulated one-time qualification failure."
+        )
         lead = run_with_safe_retry(
             lambda: get_lead_by_id(state["lead_id"]),
             stage="qualification",
