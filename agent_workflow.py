@@ -326,6 +326,97 @@ def classify_workflow_failure(
         "lead_created_before_failure": bool(lead_created),
     }
 
+
+def run_with_safe_retry(
+    operation,
+    stage,
+    lead_id=None,
+    max_attempts=2,
+):
+    """
+    Retry safe read-only operations when a transient failure occurs.
+
+    Maximum attempts: 2 (one initial attempt and one retry).
+
+    Permanent, validation, and unknown failures are never retried.
+    """
+
+    for attempt in range(1, max_attempts + 1):
+
+        try:
+            result = operation()
+
+            # Record successful recovery after a retry.
+            if attempt > 1:
+                try:
+                    create_workflow_event(
+                        lead_id,
+                        "agent_workflow_retry_succeeded",
+                        (
+                            f"Temporary failure recovered at stage "
+                            f"{stage} after {attempt} attempts."
+                        ),
+                        event_status="completed",
+                        details={
+                            "retry_stage": stage,
+                            "attempts_used": attempt,
+                            "max_attempts": max_attempts,
+                            "recovery_successful": True,
+                        },
+                    )
+                except Exception:
+                    pass
+
+            return result
+
+        except Exception as exc:
+
+            failure = classify_workflow_failure(
+                exc,
+                stage=stage,
+                lead_created=bool(lead_id),
+            )
+
+            is_transient = (
+                failure.get("underlying_failure_classification")
+                == "transient_failure"
+                and failure.get("failure_retryable") is True
+            )
+
+            # Never retry permanent, validation, or unknown failures.
+            if not is_transient:
+                raise
+
+            # No attempts remain.
+            if attempt >= max_attempts:
+                raise
+
+            # Record the retry attempt without interrupting recovery.
+            try:
+                create_workflow_event(
+                    lead_id,
+                    "agent_workflow_retry_attempted",
+                    (
+                        f"Retrying operation at stage {stage} "
+                        f"after a temporary failure."
+                    ),
+                    event_status="warning",
+                    details={
+                        "retry_stage": stage,
+                        "attempt_number": attempt + 1,
+                        "max_attempts": max_attempts,
+                        "failure_classification": (
+                            failure.get("underlying_failure_classification")
+                        ),
+                        "exception_type": (
+                            failure.get("failure_exception_type")
+                        ),
+                        "retryable": True,
+                    },
+                )
+            except Exception:
+                pass
+
 def record_workflow_failure_safely(
     lead_id,
     failure,
@@ -631,8 +722,11 @@ def duplicate_detection_agent(state: LeadWorkflowState):
     try:
         lead_data = state.get("lead_data") or {}
         
-        matches = find_potential_duplicates(lead_data)
-
+        matches = run_with_safe_retry(
+            lambda: find_potential_duplicates(lead_data),
+            stage="duplicate_detection",
+            lead_id=state.get("lead_id"),
+        )
         if matches and not state.get("allow_duplicate", False):
             return {
                 "duplicate_matches": matches,
@@ -727,7 +821,11 @@ def lead_creation_agent(state: LeadWorkflowState):
 
 def qualification_agent(state: LeadWorkflowState):
     try:
-        lead = get_lead_by_id(state["lead_id"])
+        lead = run_with_safe_retry(
+            lambda: get_lead_by_id(state["lead_id"]),
+            stage="qualification",
+            lead_id=state.get("lead_id"),
+        )
 
         if not lead:
             raise ValueError(
@@ -1963,12 +2061,18 @@ def email_draft_agent(state: LeadWorkflowState):
     This agent never sends emails.
     """
 
+    draft_id = None
+    
     # --------------------------------------------------------
     # RETRIEVE LEAD
     # --------------------------------------------------------
 
     try:
-        lead = get_lead_by_id(state["lead_id"])
+        lead = run_with_safe_retry(
+            lambda: get_lead_by_id(state["lead_id"]),
+            stage="email_draft",
+            lead_id=state.get("lead_id"),
+        )
 
     except Exception as exc:
         failure = classify_workflow_failure(
