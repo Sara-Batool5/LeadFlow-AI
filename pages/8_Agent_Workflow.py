@@ -1,8 +1,12 @@
 
 import streamlit as st
 
-from agent_workflow import run_lead_workflow
+from agent_workflow import (
+    run_lead_workflow,
+    resume_lead_workflow,
+)
 
+from database import get_leads
 
 # ============================================================
 # PAGE HEADER
@@ -704,6 +708,74 @@ if submitted:
             st.error(
                 f"Unable to run the agent workflow: {exc}"
             )
+
+# ============================================================
+# PHASE 13.4 — PARTIAL WORKFLOW RECOVERY
+# ============================================================
+
+st.divider()
+
+with st.expander(
+    "Recover an Incomplete Workflow",
+    expanded=False,
+):
+    st.caption(
+        "Select an existing lead to check whether it has a recorded "
+        "partial workflow failure. Recovery resumes from saved database "
+        "state and does not create another lead."
+    )
+
+    try:
+        recovery_leads = get_leads()
+
+        if not recovery_leads:
+            st.info("No existing leads were found.")
+
+        else:
+            recovery_lead_lookup = {
+                lead["id"]: lead
+                for lead in recovery_leads
+            }
+
+            selected_recovery_id = st.selectbox(
+                "Select an existing lead",
+                options=list(recovery_lead_lookup.keys()),
+                format_func=lambda lead_id: (
+                    f"{recovery_lead_lookup[lead_id].get('lead_reference') or lead_id}"
+                    f" — {recovery_lead_lookup[lead_id].get('contact_name') or 'Unknown contact'}"
+                    f" — {recovery_lead_lookup[lead_id].get('company') or 'Unknown company'}"
+                ),
+                key="leadflow_recovery_lead_id",
+            )
+
+            if st.button(
+                "Check and Recover Workflow",
+                type="primary",
+                use_container_width=True,
+                key="leadflow_recovery_button",
+            ):
+                with st.spinner(
+                    "Checking saved lead data and recovering incomplete stages..."
+                ):
+                    recovery_result = resume_lead_workflow(
+                        selected_recovery_id
+                    )
+
+                st.session_state[
+                    "leadflow_workflow_result"
+                ] = recovery_result
+
+                st.session_state.pop(
+                    "leadflow_pending_workflow",
+                    None,
+                )
+
+                st.rerun()
+
+    except Exception as exc:
+        st.error(
+            f"Unable to load leads for workflow recovery: {exc}"
+        )
 
 # ============================================================
 # DUPLICATE REVIEW AND EXPLICIT CONFIRMATION
