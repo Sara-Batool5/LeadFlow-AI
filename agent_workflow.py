@@ -2269,6 +2269,9 @@ def email_draft_agent(state: LeadWorkflowState):
     draft_id = None
 
     try:
+        raise ConnectionError(
+            "TEST ONLY: Simulated email-stage connection failure."
+        )
         qualification = state.get("qualification") or {}
 
         owner_name = (
