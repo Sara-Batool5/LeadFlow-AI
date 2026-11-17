@@ -2434,6 +2434,11 @@ The {owner_name} Team"""
                 "The email draft could not be saved to the database."
             )
 
+        # TEMPORARY TEST — PHASE 13.5 TEST 3
+        raise ConnectionError(
+            "TEST ONLY: Simulated failure after email draft was saved."
+        )
+
         generation_method = (
             "ai_generated"
             if ai_generation_success
